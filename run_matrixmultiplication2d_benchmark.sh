@@ -25,7 +25,7 @@ if [[ ! -f "${CUSTOM_KERNEL}" ]]; then
   exit 1
 fi
 
-java --enable-preview @tornado-argfile \
+java --enable-preview @./dist/tornadovm-1.1.2-dev-opencl-linux-amd64/tornadovm-1.1.2-dev-opencl/tornado-argfile \
   -cp "/tmp/tornado-custom-classes:bin/sdk/share/java/tornado/*" \
   uk.ac.manchester.tornado.examples.compute.custom.MatrixMultiplication2DCustomBenchmark \
   "${SIZE}" \
