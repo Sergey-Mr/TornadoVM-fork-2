@@ -23,7 +23,7 @@ public final class MatrixMultiplication2DCustomBenchmark {
 
     private static final String DEFAULT_GENERATED_KERNEL = "kernels/matrixMultiplication2d_generated.cl";
     private static final String DEFAULT_CUSTOM_KERNEL = "kernels/matrixMultiplication2d_custom.cl";
-    private static final String ENTRY_POINT = "matrixMultiplication";
+    private static final String ENTRY_POINT = "matrixMultiplicationCustom";
 
     private static final int DEFAULT_SIZE = 512;
     private static final int WARM_UP_ITERATIONS = 30;

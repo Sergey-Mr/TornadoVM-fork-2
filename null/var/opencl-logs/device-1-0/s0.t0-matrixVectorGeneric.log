@@ -1,0 +1,24 @@
+<kernel>:461:15: error: redefinition of 'matrixVectorGeneric'
+__kernel void matrixVectorGeneric(__global long *_kernel_context, __constant uchar *_constant_region, __local uchar *_local_region, __global int *_atomics, __global uchar *x, __global uchar *hb, __global uchar *w, __private int n, __private int d, __private int localWorkGroupSize)
+              ^
+<kernel>:4:15: note: previous definition is here
+__kernel void matrixVectorGeneric(__global long *_kernel_context, __constant uchar *_constant_region, __local uchar *_local_region, __global int *_atomics, __global uchar *x, __global uchar *hb, __global uchar *w, __private int n, __private int d, __private int localWorkGroupSize)
+              ^
+<kernel>:559:15: error: redefinition of 'matrixVectorParallel'
+__kernel void matrixVectorParallel(__global long *_kernel_context, __constant uchar *_constant_region, __local uchar *_local_region, __global int *_atomics, __global uchar *x, __global uchar *hb, __global uchar *w, __private int n, __private int d)
+              ^
+<kernel>:102:15: note: previous definition is here
+__kernel void matrixVectorParallel(__global long *_kernel_context, __constant uchar *_constant_region, __local uchar *_local_region, __global int *_atomics, __global uchar *x, __global uchar *hb, __global uchar *w, __private int n, __private int d)
+              ^
+<kernel>:616:15: error: redefinition of 'matrixVectorGenericFP16'
+__kernel void matrixVectorGenericFP16(__global long *_kernel_context, __constant uchar *_constant_region, __local uchar *_local_region, __global int *_atomics, __global uchar *x, __global uchar *hb, __global uchar *w, __private int n, __private int d, __private int localWorkGroupSize)
+              ^
+<kernel>:159:15: note: previous definition is here
+__kernel void matrixVectorGenericFP16(__global long *_kernel_context, __constant uchar *_constant_region, __local uchar *_local_region, __global int *_atomics, __global uchar *x, __global uchar *hb, __global uchar *w, __private int n, __private int d, __private int localWorkGroupSize)
+              ^
+<kernel>:716:15: error: redefinition of 'matrixVectorGenericFinal'
+__kernel void matrixVectorGenericFinal(__global long *_kernel_context, __constant uchar *_constant_region, __local uchar *_local_region, __global int *_atomics, __global uchar *x, __global uchar *output, __global uchar *weightsQ, __global uchar *weightScales, __private int dim1, __private int dim0, __private int localWorkGroupSize)
+              ^
+<kernel>:259:15: note: previous definition is here
+__kernel void matrixVectorGenericFinal(__global long *_kernel_context, __constant uchar *_constant_region, __local uchar *_local_region, __global int *_atomics, __global uchar *x, __global uchar *output, __global uchar *weightsQ, __global uchar *weightScales, __private int dim1, __private int dim0, __private int localWorkGroupSize)
+              ^

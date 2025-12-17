@@ -82,8 +82,10 @@ public class MatrixVectorRowCustomBenchmark {
             sequentialTimes.add(end - start);
         }
 
-        BenchmarkResult generatedResult = benchmarkPrebuiltKernel("s0", generatedKernelPath, input, weights, outputKernelContext, device);
-        BenchmarkResult customResult = benchmarkPrebuiltKernel("s1", customKernelPath, input, weights, outputCustom, device);
+        // Fair comparison: set up both plans, interleave warmup and measurement
+        FairBenchmarkResult fairResult = benchmarkKernelsFairly(
+                generatedKernelPath, customKernelPath,
+                input, weights, outputKernelContext, outputCustom, device);
 
         boolean generatedValid = validate(outputSequential, outputKernelContext, 1e-4f);
         boolean customValid = validate(outputSequential, outputCustom, 1e-4f);
@@ -96,8 +98,8 @@ public class MatrixVectorRowCustomBenchmark {
         }
 
         LongSummaryStatistics seqStats = sequentialTimes.stream().mapToLong(Long::longValue).summaryStatistics();
-        LongSummaryStatistics generatedStats = generatedResult.timingStats();
-        LongSummaryStatistics customStats = customResult.timingStats();
+        LongSummaryStatistics generatedStats = fairResult.generatedStats();
+        LongSummaryStatistics customStats = fairResult.customStats();
 
         long totalFlops = 2L * INPUT_DIM * OUTPUT_DIM;
 
@@ -140,46 +142,97 @@ public class MatrixVectorRowCustomBenchmark {
         }
     }
 
-    private static BenchmarkResult benchmarkPrebuiltKernel(String graphName, String kernelPath, FloatArray input, FloatArray weights, FloatArray output, TornadoDevice device)
-            throws TornadoExecutionPlanException {
-        AccessorParameters accessors = new AccessorParameters(6);
-        accessors.set(0, input, Access.READ_ONLY);
-        accessors.set(1, output, Access.WRITE_ONLY);
-        accessors.set(2, weights, Access.READ_ONLY);
-        accessors.set(3, Integer.valueOf(INPUT_DIM), Access.NONE);
-        accessors.set(4, Integer.valueOf(OUTPUT_DIM), Access.NONE);
-        accessors.set(5, Integer.valueOf(LOCAL_WORK_GROUP_SIZE), Access.NONE);
+    /**
+     * Fair benchmark: creates both execution plans, interleaves warmup and measurement
+     * to avoid GPU power state and cache biases.
+     */
+    private static FairBenchmarkResult benchmarkKernelsFairly(
+            String generatedKernelPath, String customKernelPath,
+            FloatArray input, FloatArray weights,
+            FloatArray outputGenerated, FloatArray outputCustom,
+            TornadoDevice device) throws TornadoExecutionPlanException {
 
-        TaskGraph graph = new TaskGraph(graphName)
+        // Set up generated kernel plan
+        AccessorParameters accessorsGenerated = new AccessorParameters(6);
+        accessorsGenerated.set(0, input, Access.READ_ONLY);
+        accessorsGenerated.set(1, outputGenerated, Access.WRITE_ONLY);
+        accessorsGenerated.set(2, weights, Access.READ_ONLY);
+        accessorsGenerated.set(3, Integer.valueOf(INPUT_DIM), Access.NONE);
+        accessorsGenerated.set(4, Integer.valueOf(OUTPUT_DIM), Access.NONE);
+        accessorsGenerated.set(5, Integer.valueOf(LOCAL_WORK_GROUP_SIZE), Access.NONE);
+
+        TaskGraph graphGenerated = new TaskGraph("s0")
                 .transferToDevice(DataTransferMode.FIRST_EXECUTION, input, weights)
-                .prebuiltTask("t0", ENTRY_POINT, kernelPath, accessors)
-                .transferToHost(DataTransferMode.EVERY_EXECUTION, output);
+                .prebuiltTask("t0", ENTRY_POINT, generatedKernelPath, accessorsGenerated)
+                .transferToHost(DataTransferMode.EVERY_EXECUTION, outputGenerated);
 
-        ImmutableTaskGraph snapshot = graph.snapshot();
+        ImmutableTaskGraph snapshotGenerated = graphGenerated.snapshot();
 
-        WorkerGrid1D worker = new WorkerGrid1D(OUTPUT_DIM * LOCAL_WORK_GROUP_SIZE);
-        worker.setLocalWork(LOCAL_WORK_GROUP_SIZE, 1, 1);
-        GridScheduler scheduler = new GridScheduler(graphName + ".t0", worker);
+        WorkerGrid1D workerGenerated = new WorkerGrid1D(OUTPUT_DIM * LOCAL_WORK_GROUP_SIZE);
+        workerGenerated.setLocalWork(LOCAL_WORK_GROUP_SIZE, 1, 1);
+        GridScheduler schedulerGenerated = new GridScheduler("s0.t0", workerGenerated);
 
-        ArrayList<Long> times = new ArrayList<>();
+        // Set up custom kernel plan
+        AccessorParameters accessorsCustom = new AccessorParameters(6);
+        accessorsCustom.set(0, input, Access.READ_ONLY);
+        accessorsCustom.set(1, outputCustom, Access.WRITE_ONLY);
+        accessorsCustom.set(2, weights, Access.READ_ONLY);
+        accessorsCustom.set(3, Integer.valueOf(INPUT_DIM), Access.NONE);
+        accessorsCustom.set(4, Integer.valueOf(OUTPUT_DIM), Access.NONE);
+        accessorsCustom.set(5, Integer.valueOf(LOCAL_WORK_GROUP_SIZE), Access.NONE);
 
-        try (TornadoExecutionPlan plan = new TornadoExecutionPlan(snapshot)) {
-            plan.withDevice(device);
-            plan.withGridScheduler(scheduler);
+        TaskGraph graphCustom = new TaskGraph("s1")
+                .transferToDevice(DataTransferMode.FIRST_EXECUTION, input, weights)
+                .prebuiltTask("t0", ENTRY_POINT, customKernelPath, accessorsCustom)
+                .transferToHost(DataTransferMode.EVERY_EXECUTION, outputCustom);
+
+        ImmutableTaskGraph snapshotCustom = graphCustom.snapshot();
+
+        WorkerGrid1D workerCustom = new WorkerGrid1D(OUTPUT_DIM * LOCAL_WORK_GROUP_SIZE);
+        workerCustom.setLocalWork(LOCAL_WORK_GROUP_SIZE, 1, 1);
+        GridScheduler schedulerCustom = new GridScheduler("s1.t0", workerCustom);
+
+        ArrayList<Long> generatedTimes = new ArrayList<>();
+        ArrayList<Long> customTimes = new ArrayList<>();
+
+        try (TornadoExecutionPlan planGenerated = new TornadoExecutionPlan(snapshotGenerated);
+             TornadoExecutionPlan planCustom = new TornadoExecutionPlan(snapshotCustom)) {
+
+            planGenerated.withDevice(device);
+            planGenerated.withGridScheduler(schedulerGenerated);
+            planCustom.withDevice(device);
+            planCustom.withGridScheduler(schedulerCustom);
+
+            // Interleaved warmup - both kernels warmed up together
+            System.out.println("Warming up both kernels (interleaved)...");
             for (int i = 0; i < WARM_UP_ITERATIONS; i++) {
-                plan.execute();
+                planGenerated.execute();
+                planCustom.execute();
             }
+
+            // Interleaved measurement - alternating to ensure fair comparison
+            System.out.println("Measuring both kernels (interleaved)...");
             for (int i = 0; i < BENCHMARK_ITERATIONS; i++) {
-                long start = System.nanoTime();
-                plan.execute();
-                long end = System.nanoTime();
-                times.add(end - start);
+                // Measure generated
+                long startGen = System.nanoTime();
+                planGenerated.execute();
+                long endGen = System.nanoTime();
+                generatedTimes.add(endGen - startGen);
+
+                // Measure custom
+                long startCustom = System.nanoTime();
+                planCustom.execute();
+                long endCustom = System.nanoTime();
+                customTimes.add(endCustom - startCustom);
             }
         }
 
-        return new BenchmarkResult(times.stream().mapToLong(Long::longValue).summaryStatistics());
+        return new FairBenchmarkResult(
+                generatedTimes.stream().mapToLong(Long::longValue).summaryStatistics(),
+                customTimes.stream().mapToLong(Long::longValue).summaryStatistics()
+        );
     }
 
-    private record BenchmarkResult(LongSummaryStatistics timingStats) {
+    private record FairBenchmarkResult(LongSummaryStatistics generatedStats, LongSummaryStatistics customStats) {
     }
 }

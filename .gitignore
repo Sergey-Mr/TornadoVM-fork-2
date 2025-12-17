@@ -31,3 +31,68 @@ tornado.iml
 tornado_unittests.log
 OpenCL-Headers/
 tornado-assembly/src/etc/tornado.backend
+####################################
+# IDEs
+####################################
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+####################################
+# Build & Java artifacts
+####################################
+*.class
+*.jar
+*.war
+*.ear
+
+target/
+bin/
+out/
+dist/
+
+####################################
+# Python / misc tooling
+####################################
+__pycache__/
+bin/__pycache__/
+
+####################################
+# Maven
+####################################
+.mvn/wrapper/maven-wrapper.jar
+.mvn/maven.config.broken
+
+####################################
+# OS junk
+####################################
+.DS_Store
+Thumbs.db
+
+####################################
+# Logs & temporary files
+####################################
+*.log
+*.tmp
+*.save
+*.bak
+*.swp
+hs_err_pid*
+
+####################################
+# TornadoVM / OpenCL generated artifacts
+####################################
+# Generated OpenCL kernels
+*_generated.cl
+
+# Runtime compiler cache & logs
+null/
+**/opencl-compiler/
+**/opencl-logs/
+
+####################################
+# Benchmark outputs
+####################################
+stats-*.txt
