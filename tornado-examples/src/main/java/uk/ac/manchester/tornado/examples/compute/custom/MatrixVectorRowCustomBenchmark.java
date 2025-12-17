@@ -17,6 +17,9 @@ import uk.ac.manchester.tornado.api.exceptions.TornadoExecutionPlanException;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import uk.ac.manchester.tornado.api.runtime.TornadoRuntimeProvider;
 import uk.ac.manchester.tornado.examples.compute.MatrixVectorRowMajor;
+import uk.ac.manchester.tornado.api.TornadoExecutionResult;
+import uk.ac.manchester.tornado.api.TornadoProfilerResult;
+import uk.ac.manchester.tornado.api.enums.ProfilerMode;
 
 public class MatrixVectorRowCustomBenchmark {
 
@@ -143,8 +146,12 @@ public class MatrixVectorRowCustomBenchmark {
     }
 
     /**
-     * Fair benchmark: creates both execution plans, interleaves warmup and measurement
-     * to avoid GPU power state and cache biases.
+     * Sequential benchmark: creates both execution plans, performs complete warmup and measurement
+     * for each kernel sequentially to reduce context switches.
+     */
+    /**
+     * Sequential benchmark using TornadoVM profiler to measure kernel execution time only.
+     * This eliminates overhead from data transfers and other host-side operations.
      */
     private static FairBenchmarkResult benchmarkKernelsFairly(
             String generatedKernelPath, String customKernelPath,
@@ -192,44 +199,56 @@ public class MatrixVectorRowCustomBenchmark {
         workerCustom.setLocalWork(LOCAL_WORK_GROUP_SIZE, 1, 1);
         GridScheduler schedulerCustom = new GridScheduler("s1.t0", workerCustom);
 
-        ArrayList<Long> generatedTimes = new ArrayList<>();
-        ArrayList<Long> customTimes = new ArrayList<>();
+        ArrayList<Long> generatedKernelTimes = new ArrayList<>();
+        ArrayList<Long> customKernelTimes = new ArrayList<>();
 
         try (TornadoExecutionPlan planGenerated = new TornadoExecutionPlan(snapshotGenerated);
              TornadoExecutionPlan planCustom = new TornadoExecutionPlan(snapshotCustom)) {
 
-            planGenerated.withDevice(device);
-            planGenerated.withGridScheduler(schedulerGenerated);
-            planCustom.withDevice(device);
-            planCustom.withGridScheduler(schedulerCustom);
+            planGenerated.withDevice(device).withGridScheduler(schedulerGenerated);
+            planCustom.withDevice(device).withGridScheduler(schedulerCustom);
 
-            // Interleaved warmup - both kernels warmed up together
-            System.out.println("Warming up both kernels (interleaved)...");
+            // Sequential approach: Complete warmup and measurement for kernel 1, then kernel 2
+            System.out.println("Warming up and measuring generated kernel (kernel time only)...");
+        
+            // Warmup generated kernel
             for (int i = 0; i < WARM_UP_ITERATIONS; i++) {
                 planGenerated.execute();
-                planCustom.execute();
+            }
+        
+            // Measure generated kernel using profiler
+            for (int i = 0; i < BENCHMARK_ITERATIONS; i++) {
+                TornadoExecutionResult result = planGenerated
+                        .withProfiler(ProfilerMode.SILENT)
+                        .execute();
+            
+                TornadoProfilerResult profilerResult = result.getProfilerResult();
+                long kernelTime = profilerResult.getDeviceKernelTime();
+                generatedKernelTimes.add(kernelTime);
             }
 
-            // Interleaved measurement - alternating to ensure fair comparison
-            System.out.println("Measuring both kernels (interleaved)...");
-            for (int i = 0; i < BENCHMARK_ITERATIONS; i++) {
-                // Measure generated
-                long startGen = System.nanoTime();
-                planGenerated.execute();
-                long endGen = System.nanoTime();
-                generatedTimes.add(endGen - startGen);
-
-                // Measure custom
-                long startCustom = System.nanoTime();
+            System.out.println("Warming up and measuring custom kernel (kernel time only)...");
+        
+            // Warmup custom kernel
+            for (int i = 0; i < WARM_UP_ITERATIONS; i++) {
                 planCustom.execute();
-                long endCustom = System.nanoTime();
-                customTimes.add(endCustom - startCustom);
+            }
+        
+            // Measure custom kernel using profiler
+            for (int i = 0; i < BENCHMARK_ITERATIONS; i++) {
+                TornadoExecutionResult result = planCustom
+                        .withProfiler(ProfilerMode.SILENT)
+                        .execute();
+            
+                TornadoProfilerResult profilerResult = result.getProfilerResult();
+                long kernelTime = profilerResult.getDeviceKernelTime();
+                customKernelTimes.add(kernelTime);
             }
         }
 
         return new FairBenchmarkResult(
-                generatedTimes.stream().mapToLong(Long::longValue).summaryStatistics(),
-                customTimes.stream().mapToLong(Long::longValue).summaryStatistics()
+                generatedKernelTimes.stream().mapToLong(Long::longValue).summaryStatistics(),
+                customKernelTimes.stream().mapToLong(Long::longValue).summaryStatistics()
         );
     }
 
