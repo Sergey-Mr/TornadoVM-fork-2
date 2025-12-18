@@ -24,8 +24,8 @@ import uk.ac.manchester.tornado.api.runtime.TornadoRuntimeProvider;
 public class MatrixMul2DLocalMemoryValidator {
 
     private static final int DEFAULT_SIZE = 512; // Smaller for faster validation
-    private static final int TS = 32; // Tile size - must match kernel
-    private static final String ENTRY_POINT = "matrixMultiplicationLocalMemory";
+    private static final int TS = 16; // Tile size - must match kernel (custom uses 16)
+    private static final String ENTRY_POINT = "matrixMultiplication";
     private static final float TOLERANCE = 0.01f; // Larger tolerance for accumulated FP errors in matmul
     private static final Random RANDOM = new Random(42);
 

@@ -32,10 +32,10 @@ import uk.ac.manchester.tornado.api.enums.ProfilerMode;
 public class MatrixMul2DLocalMemorySingleKernelBenchmark {
 
     private static final int DEFAULT_SIZE = 1024;
-    private static final int TS = 32; // Tile size - must match kernel
+    private static final int TS = 16; // Tile size - must match kernel (custom uses 16)
     private static final int WARM_UP_ITERATIONS = 50;
     private static final int BENCHMARK_ITERATIONS = 100;
-    private static final String ENTRY_POINT = "matrixMultiplicationLocalMemory";
+    private static final String ENTRY_POINT = "matrixMultiplication";
     private static final Random RANDOM = new Random(42);
 
     private static void fillRandomData(FloatArray array, float min, float max) {
