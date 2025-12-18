@@ -235,8 +235,14 @@ public class MatrixVectorRowCustomBenchmark {
                 generatedKernelTimes.add(kernelTime);
             }
 
+            // GPU stabilization for custom kernel (equal treatment as generated kernel)
+            System.out.println("Stabilizing GPU state for custom kernel...");
+            for (int i = 0; i < GPU_STABILIZATION_ITERATIONS; i++) {
+                planCustom.execute();
+            }
+
             System.out.println("Warming up and measuring custom kernel (kernel time only)...");
-        
+
             // Warmup custom kernel
             for (int i = 0; i < WARM_UP_ITERATIONS; i++) {
                 planCustom.execute();
