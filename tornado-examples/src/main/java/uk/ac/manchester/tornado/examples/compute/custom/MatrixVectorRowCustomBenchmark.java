@@ -28,6 +28,7 @@ public class MatrixVectorRowCustomBenchmark {
     private static final int LOCAL_WORK_GROUP_SIZE = 128;
     private static final int WARM_UP_ITERATIONS = 60;
     private static final int BENCHMARK_ITERATIONS = 120;
+    private static final int GPU_STABILIZATION_ITERATIONS = 100; // Extra warmup to stabilize GPU state before first measurement
 
     private static final String DEFAULT_GENERATED_KERNEL = "kernels/matrixvector_generated.cl";
     private static final String DEFAULT_CUSTOM_KERNEL = "kernels/matrixvector_custom.cl";
@@ -209,8 +210,15 @@ public class MatrixVectorRowCustomBenchmark {
             planCustom.withDevice(device).withGridScheduler(schedulerCustom);
 
             // Sequential approach: Complete warmup and measurement for kernel 1, then kernel 2
+
+            // GPU stabilization phase - ensure GPU is in stable boosted state before any measurement
+            System.out.println("Stabilizing GPU state...");
+            for (int i = 0; i < GPU_STABILIZATION_ITERATIONS; i++) {
+                planGenerated.execute();
+            }
+
             System.out.println("Warming up and measuring generated kernel (kernel time only)...");
-        
+
             // Warmup generated kernel
             for (int i = 0; i < WARM_UP_ITERATIONS; i++) {
                 planGenerated.execute();
