@@ -30,7 +30,7 @@ import org.graalvm.compiler.nodes.GuardNode;
 import org.graalvm.compiler.nodes.LogicNode;
 import org.graalvm.compiler.nodes.StructuredGraph;
 import org.graalvm.compiler.nodes.extended.GuardedNode;
-import org.graalvm.compiler.nodes.extended.ValueAnchorNode;
+// import org.graalvm.compiler.nodes.extended.ValueAnchorNode;  // Removed due to Graal API change
 import org.graalvm.compiler.phases.BasePhase;
 
 import uk.ac.manchester.tornado.runtime.graal.phases.TornadoHighTierContext;
@@ -59,13 +59,14 @@ public class ExceptionSuppression extends BasePhase<TornadoHighTierContext> {
             }
         });
 
-        graph.getNodes().filter(ValueAnchorNode.class).forEach(anchor -> {
-            if (anchor.getAnchoredNode() instanceof GuardNode guard) {
-                guards.add(guard);
-                conditions.add(guard.getCondition());
-                anchor.removeAnchoredNode();
-            }
-        });
+        // TODO: Commented out due to Graal API change - getAnchoredNode()/removeAnchoredNode() removed
+        // graph.getNodes().filter(ValueAnchorNode.class).forEach(anchor -> {
+        //     if (anchor.getAnchoredNode() instanceof GuardNode guard) {
+        //         guards.add(guard);
+        //         conditions.add(guard.getCondition());
+        //         anchor.removeAnchoredNode();
+        //     }
+        // });
 
         guards.forEach(guard -> {
             guard.clearInputs();
