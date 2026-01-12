@@ -86,6 +86,7 @@ Using `getDeviceKernelTime()` from TornadoVM profiler:
 | MonteCarlo | `MonteCarloSingleKernelBenchmark` | `MonteCarloValidator` | MSamples/s |
 | BlackScholes | `BlackScholesSingleKernelBenchmark` | `BlackScholesValidator` | MOptions/s |
 | BlurFilter | `BlurFilterSingleKernelBenchmark` | `BlurFilterValidator` | MPixels/s, GFLOP/s |
+| ReductionAddFloats | `ReductionAddFloatsSingleKernelBenchmark` | `ReductionAddFloatsValidator` | GB/s, MElements/s |
 
 ---
 
@@ -239,6 +240,21 @@ java --enable-preview @${TORNADO_SDK}/tornado-argfile \
   kernels/blurfilter_generated.cl kernels/blurfilter_custom.cl --size=512 --filter=15
 ```
 
+### ReductionAddFloats
+```bash
+# Benchmark (default 16M elements)
+java --enable-preview @${TORNADO_SDK}/tornado-argfile \
+  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
+  uk.ac.manchester.tornado.examples.compute.custom.ReductionAddFloatsSingleKernelBenchmark \
+  kernels/reduction_generated.cl 16777216
+
+# Validate
+java --enable-preview @${TORNADO_SDK}/tornado-argfile \
+  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
+  uk.ac.manchester.tornado.examples.compute.custom.ReductionAddFloatsValidator \
+  kernels/reduction_generated.cl kernels/reduction_custom.cl --size=1000000
+```
+
 ---
 
 ## How to Generate Kernels from TornadoVM
@@ -270,6 +286,9 @@ tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.comp
 
 # BlurFilter
 tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.BlurFilter
+
+# ReductionAddFloats
+tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.reductions.ReductionAddFloats
 ```
 
 Extract the `__kernel void ...` section and save to `kernels/<name>_generated.cl`.
@@ -287,6 +306,7 @@ Extract the `__kernel void ...` section and save to `kernels/<name>_generated.cl
 | MonteCarlo | `computeMontecarlo` | 1D parallel |
 | BlackScholes | `blackScholesKernel` | 1D parallel |
 | BlurFilter | `compute` | 2D parallel |
+| ReductionAddFloats | `reductionAddFloats` | 1D parallel, reduction |
 
 ---
 
@@ -452,6 +472,8 @@ kernels/
 ├── blackscholes_custom.cl
 ├── blurfilter_generated.cl
 ├── blurfilter_custom.cl
+├── reduction_generated.cl
+├── reduction_custom.cl
 ├── opt1_restrict.cl
 ├── opt2_unroll.cl
 ├── opt3_workgroup.cl
