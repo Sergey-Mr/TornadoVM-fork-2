@@ -37,8 +37,8 @@ public class NBodyPTXBenchmark {
     private static final int WARM_UP_ITERATIONS = 20;
     private static final int BENCHMARK_ITERATIONS = 50;
 
-    // TODO: Update this after generating PTX kernel
-    private static final String ENTRY_POINT = "nBody";
+    // PTX entry point from generated kernel
+    private static final String ENTRY_POINT = "s0_t0_nbody_2048_arrays_floatarray_arrays_floatarray_0_005_500_0";
 
     // NBody simulation parameters
     private static final float DEL_T = 0.005f;
