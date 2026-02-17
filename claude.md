@@ -1,17 +1,52 @@
-# TornadoVM Single Kernel Benchmark Guide
+# TornadoVM OpenCL Kernel Optimization Project
 
-## Overview
+## Project Context
 
-This document explains the Single Kernel Benchmark methodology for fairly comparing TornadoVM-generated OpenCL kernels against hand-optimized custom kernels.
+This repository contains a benchmarking infrastructure for **fairly comparing TornadoVM-generated OpenCL kernels against hand-optimized custom kernels**. The goal is to measure and improve GPU kernel performance while ensuring valid, reproducible results.
+
+### What We're Working On
+
+1. **Generating OpenCL kernels** from TornadoVM Java code using `--printKernel`
+2. **Creating hand-optimized versions** with progressive optimizations
+3. **Benchmarking with KERNEL_TIME only** - isolating GPU execution from data transfer
+4. **Validating correctness** before trusting benchmark results
+5. **Documenting optimization techniques** that work (or don't) on different hardware
+
+### Key Insight: Separate Runs for Fair Comparison
+
+**CRITICAL**: Generated and optimized kernels must be benchmarked in **separate JVM executions**:
+
+```
+# Run 1 (fresh JVM, cold GPU):
+java ... BenchmarkClass kernels/matrix1d_generated.cl 1024
+# Result: Avg 5.234 ms, 412.5 GFLOP/s
+
+# Run 2 (fresh JVM, cold GPU):
+java ... BenchmarkClass kernels/matrix1d_custom.cl 1024
+# Result: Avg 4.123 ms, 523.8 GFLOP/s
+```
+
+**Why?** Traditional benchmarks that compare kernels in the same run suffer from **ordering bias** - the second kernel always runs faster (20-30%) due to:
+- GPU being in boosted clock state
+- Driver optimizations cached
+- Memory controllers warmed up
+
+Our methodology ensures both kernels start from identical cold GPU state.
+
+---
 
 ## System Information
 
-### Remote Server
+### Remote Server (Primary)
 - **Host**: `serhii@storm`
 - **Location**: `~/TornadoVM-fork-2`
 - **GPU**: NVIDIA GeForce RTX 4090
 - **Platform**: Linux (Ubuntu)
 - **Java**: GraalVM JDK 21.0.9+7.1
+
+### Local Development (MacBook)
+- **GPU**: Apple M4 (max 32 threads/work-group)
+- Kernels in `kernels/macbook/` for platform-specific testing
 
 ### Environment Setup
 ```bash
@@ -34,42 +69,31 @@ make
 
 ---
 
-## Why Single Kernel Benchmarks?
-
-### The Problem: Ordering Bias
-
-When comparing two kernels in the same benchmark run:
-```
-[Kernel A warmup] → [Kernel A measure] → [Kernel B warmup] → [Kernel B measure]
-```
-
-**Kernel B always benefits from:**
-- GPU being in boosted clock state
-- Driver optimizations cached
-- Memory controllers warmed up
-
-**Result:** Even identical kernels show 20-30% difference due to ordering, not actual performance.
-
-### The Solution: Single Kernel Per Run
+## File Structure
 
 ```
-Run 1: [cold GPU] → [Kernel A warmup] → [Kernel A measure]
-Run 2: [cold GPU] → [Kernel B warmup] → [Kernel B measure]
+TornadoVM-fork-2/
+├── CLAUDE.md                    # This file - AI context and instructions
+├── docs/
+│   └── BENCHMARKING.md          # Detailed methodology documentation
+├── kernels/                     # OpenCL kernel files
+│   ├── *_generated.cl           # Extracted from TornadoVM
+│   ├── *_custom.cl              # Hand-optimized versions
+│   ├── opt1_restrict.cl         # Matrix optimization series
+│   ├── opt2_unroll.cl
+│   ├── opt3_workgroup.cl
+│   ├── opt4_local_memory.cl
+│   ├── opt5_local_unroll.cl
+│   ├── nbody/                   # NBody optimization series
+│   │   ├── nbody_opt1_fp32_rsqrt.cl
+│   │   ├── nbody_opt2_restrict.cl
+│   │   └── ... (7 variants)
+│   ├── matrixrowmajor/          # Matrix-vector optimizations
+│   └── macbook/                 # Platform-specific kernels
+└── tornado-examples/src/main/java/uk/ac/manchester/tornado/examples/compute/custom/
+    ├── *SingleKernelBenchmark.java   # Benchmark classes
+    └── *Validator.java               # Validation classes
 ```
-
-**Benefits:**
-- Both kernels start from identical cold GPU state
-- Both get identical warmup treatment
-- Fair, reproducible comparison
-- Measures actual kernel performance difference
-
-### What We Measure: KERNEL_TIME Only
-
-Using `getDeviceKernelTime()` from TornadoVM profiler:
-- Measures ONLY GPU kernel execution time
-- Excludes data transfers
-- Excludes host-side overhead
-- Excludes compilation time (handled by warmup)
 
 ---
 
@@ -80,13 +104,14 @@ Using `getDeviceKernelTime()` from TornadoVM profiler:
 | Matrix-Vector Row | `MatrixVectorRowMajorSingleKernelBenchmark` | `KernelValidator` | GFLOP/s |
 | MatrixMul 2D Local | `MatrixMul2DLocalMemorySingleKernelBenchmark` | `MatrixMul2DLocalMemoryValidator` | GFLOP/s |
 | MatrixMul 1D | `MatrixMultiplication1DSingleKernelBenchmark` | `MatrixMultiplication1DValidator` | GFLOP/s |
-| NBody | `NBodySingleKernelBenchmark` | `NBodyValidator` | GFLOP/s, Billion Interactions/s |
+| NBody | `NBodySingleKernelBenchmark` | `NBodyValidator` | GFLOP/s |
 | BFS | `BFSSingleKernelBenchmark` | `BFSValidator` | MTEPS |
 | Mandelbrot | `MandelbrotSingleKernelBenchmark` | `MandelbrotValidator` | MPixels/s |
 | MonteCarlo | `MonteCarloSingleKernelBenchmark` | `MonteCarloValidator` | MSamples/s |
 | BlackScholes | `BlackScholesSingleKernelBenchmark` | `BlackScholesValidator` | MOptions/s |
-| BlurFilter | `BlurFilterSingleKernelBenchmark` | `BlurFilterValidator` | MPixels/s, GFLOP/s |
-| ReductionAddFloats | `ReductionAddFloatsSingleKernelBenchmark` | `ReductionAddFloatsValidator` | GB/s, MElements/s |
+| BlurFilter | `BlurFilterSingleKernelBenchmark` | `BlurFilterValidator` | MPixels/s |
+| ReductionAddFloats | `ReductionAddFloatsSingleKernelBenchmark` | `ReductionAddFloatsValidator` | GB/s |
+| FlashAttention | `FlashAttentionSingleKernelBenchmark` | `FlashAttentionValidator` | GFLOP/s |
 
 ---
 
@@ -100,159 +125,34 @@ java --enable-preview @${TORNADO_SDK}/tornado-argfile \
   <kernel.cl> [size_params]
 ```
 
-### Matrix-Vector Row Major
+### Example: Matrix Multiplication 1D
 ```bash
-# Benchmark
-java --enable-preview @${TORNADO_SDK}/tornado-argfile \
-  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
-  uk.ac.manchester.tornado.examples.compute.custom.MatrixVectorRowMajorSingleKernelBenchmark \
-  kernels/matrixvectorrow_generated.cl
-
-java --enable-preview @${TORNADO_SDK}/tornado-argfile \
-  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
-  uk.ac.manchester.tornado.examples.compute.custom.MatrixVectorRowMajorSingleKernelBenchmark \
-  kernels/matrixvectorrow_custom.cl
-
-# Validate
-java --enable-preview @${TORNADO_SDK}/tornado-argfile \
-  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
-  uk.ac.manchester.tornado.examples.compute.custom.KernelValidator \
-  kernels/matrixvectorrow_generated.cl kernels/matrixvectorrow_custom.cl
-```
-
-### Matrix Multiplication 2D (Local Memory)
-```bash
-# Benchmark (default size 1024)
-java --enable-preview @${TORNADO_SDK}/tornado-argfile \
-  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
-  uk.ac.manchester.tornado.examples.compute.custom.MatrixMul2DLocalMemorySingleKernelBenchmark \
-  kernels/matrixmul2dlocalmemory_generated.cl 1024
-
-# Validate
-java --enable-preview @${TORNADO_SDK}/tornado-argfile \
-  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
-  uk.ac.manchester.tornado.examples.compute.custom.MatrixMul2DLocalMemoryValidator \
-  kernels/matrixmul2dlocalmemory_generated.cl kernels/matrixmul2dlocalmemory_custom.cl
-```
-
-### Matrix Multiplication 1D
-```bash
-# Benchmark
+# Run benchmark
 java --enable-preview @${TORNADO_SDK}/tornado-argfile \
   -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
   uk.ac.manchester.tornado.examples.compute.custom.MatrixMultiplication1DSingleKernelBenchmark \
-  kernels/matrixmultiplication1d_generated.cl 1024
+  kernels/matrix1d_generated.cl 1024
 
-# Validate
+# Validate first (always validate before trusting benchmark)
 java --enable-preview @${TORNADO_SDK}/tornado-argfile \
   -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
   uk.ac.manchester.tornado.examples.compute.custom.MatrixMultiplication1DValidator \
-  kernels/matrixmultiplication1d_generated.cl kernels/matrixmultiplication1d_custom.cl
+  kernels/matrix1d_generated.cl kernels/matrix1d_custom.cl
 ```
 
-### NBody
+### Example: NBody
 ```bash
-# Benchmark (default 16384 bodies)
+# Benchmark
 java --enable-preview @${TORNADO_SDK}/tornado-argfile \
   -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
   uk.ac.manchester.tornado.examples.compute.custom.NBodySingleKernelBenchmark \
-  kernels/nbody_generated.cl 16384
+  kernels/nbody/nbody_opt7_local_memory.cl 16384
 
-# Validate (smaller size for speed)
+# Validate
 java --enable-preview @${TORNADO_SDK}/tornado-argfile \
   -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
   uk.ac.manchester.tornado.examples.compute.custom.NBodyValidator \
-  kernels/nbody_generated.cl kernels/nbody_optimized.cl --bodies=1024
-```
-
-### BFS
-```bash
-# Benchmark (default 2000 nodes)
-java --enable-preview @${TORNADO_SDK}/tornado-argfile \
-  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
-  uk.ac.manchester.tornado.examples.compute.custom.BFSSingleKernelBenchmark \
-  kernels/bfs_generated.cl 2000
-
-# Validate
-java --enable-preview @${TORNADO_SDK}/tornado-argfile \
-  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
-  uk.ac.manchester.tornado.examples.compute.custom.BFSValidator \
-  kernels/bfs_generated.cl kernels/bfs_custom.cl --nodes=1000
-```
-
-### Mandelbrot
-```bash
-# Benchmark (default 1024x1024)
-java --enable-preview @${TORNADO_SDK}/tornado-argfile \
-  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
-  uk.ac.manchester.tornado.examples.compute.custom.MandelbrotSingleKernelBenchmark \
-  kernels/mandelbrot_generated.cl 1024
-
-# Validate
-java --enable-preview @${TORNADO_SDK}/tornado-argfile \
-  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
-  uk.ac.manchester.tornado.examples.compute.custom.MandelbrotValidator \
-  kernels/mandelbrot_generated.cl kernels/mandelbrot_custom.cl --size=512
-```
-
-### MonteCarlo
-```bash
-# Benchmark (default 16M samples)
-java --enable-preview @${TORNADO_SDK}/tornado-argfile \
-  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
-  uk.ac.manchester.tornado.examples.compute.custom.MonteCarloSingleKernelBenchmark \
-  kernels/montecarlo_generated.cl 16777216
-
-# Validate
-java --enable-preview @${TORNADO_SDK}/tornado-argfile \
-  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
-  uk.ac.manchester.tornado.examples.compute.custom.MonteCarloValidator \
-  kernels/montecarlo_generated.cl kernels/montecarlo_custom.cl --samples=1000000
-```
-
-### BlackScholes
-```bash
-# Benchmark (default 4M options)
-java --enable-preview @${TORNADO_SDK}/tornado-argfile \
-  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
-  uk.ac.manchester.tornado.examples.compute.custom.BlackScholesSingleKernelBenchmark \
-  kernels/blackscholes_generated.cl 4194304
-
-# Validate
-java --enable-preview @${TORNADO_SDK}/tornado-argfile \
-  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
-  uk.ac.manchester.tornado.examples.compute.custom.BlackScholesValidator \
-  kernels/blackscholes_generated.cl kernels/blackscholes_custom.cl --options=100000
-```
-
-### BlurFilter
-```bash
-# Benchmark (default 2048x2048, filter 31x31)
-java --enable-preview @${TORNADO_SDK}/tornado-argfile \
-  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
-  uk.ac.manchester.tornado.examples.compute.custom.BlurFilterSingleKernelBenchmark \
-  kernels/blurfilter_generated.cl 2048 31
-
-# Validate
-java --enable-preview @${TORNADO_SDK}/tornado-argfile \
-  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
-  uk.ac.manchester.tornado.examples.compute.custom.BlurFilterValidator \
-  kernels/blurfilter_generated.cl kernels/blurfilter_custom.cl --size=512 --filter=15
-```
-
-### ReductionAddFloats
-```bash
-# Benchmark (default 16M elements)
-java --enable-preview @${TORNADO_SDK}/tornado-argfile \
-  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
-  uk.ac.manchester.tornado.examples.compute.custom.ReductionAddFloatsSingleKernelBenchmark \
-  kernels/reduction_generated.cl 16777216
-
-# Validate
-java --enable-preview @${TORNADO_SDK}/tornado-argfile \
-  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
-  uk.ac.manchester.tornado.examples.compute.custom.ReductionAddFloatsValidator \
-  kernels/reduction_generated.cl kernels/reduction_custom.cl --size=1000000
+  kernels/nbody_optimized.cl --bodies=1024
 ```
 
 ---
@@ -264,283 +164,121 @@ Use `--printKernel` flag to see generated OpenCL:
 tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.<ExampleClass> 2>&1 | tee output.txt
 ```
 
-### Examples:
-```bash
-# Matrix Multiplication 2D Local Memory
-tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.kernelcontext.matrices.MatrixMul2DLocalMemory
-
-# NBody
-tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.NBody --params="2048 1"
-
-# BFS
-tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.BFS
-
-# Mandelbrot
-tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.Mandelbrot
-
-# MonteCarlo
-tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.MonteCarlo
-
-# BlackScholes
-tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.BlackScholes
-
-# BlurFilter
-tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.BlurFilter
-
-# ReductionAddFloats
-tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.reductions.ReductionAddFloats
-```
-
 Extract the `__kernel void ...` section and save to `kernels/<name>_generated.cl`.
 
 ### Kernel Entry Points
 
-| Algorithm | Entry Point Function | Notes |
-|-----------|---------------------|-------|
-| Matrix-Vector Row | `matrixVectorRowMajor` | 1D parallel |
-| MatrixMul 2D Local | `matrixMultiplication` | 2D parallel, local memory |
-| MatrixMul 1D | `matrixMultiplication` | 2D parallel |
-| NBody | `nBody` | 1D parallel |
-| BFS | `runBFS` | 2D parallel, iterative |
-| Mandelbrot | `mandelbrotTornado` | 2D parallel |
-| MonteCarlo | `computeMontecarlo` | 1D parallel |
-| BlackScholes | `blackScholesKernel` | 1D parallel |
-| BlurFilter | `compute` | 2D parallel |
-| ReductionAddFloats | `reductionAddFloats` | 1D parallel, reduction |
-
----
-
-## How to Create a New Single Kernel Benchmark
-
-### Template Structure
-
-```java
-package uk.ac.manchester.tornado.examples.compute.custom;
-
-import java.util.ArrayList;
-import java.util.LongSummaryStatistics;
-import java.util.Random;
-
-import uk.ac.manchester.tornado.api.AccessorParameters;
-import uk.ac.manchester.tornado.api.GridScheduler;
-import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
-import uk.ac.manchester.tornado.api.TaskGraph;
-import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
-import uk.ac.manchester.tornado.api.WorkerGrid1D;  // or WorkerGrid2D
-import uk.ac.manchester.tornado.api.common.Access;
-import uk.ac.manchester.tornado.api.common.TornadoDevice;
-import uk.ac.manchester.tornado.api.enums.DataTransferMode;
-import uk.ac.manchester.tornado.api.exceptions.TornadoExecutionPlanException;
-import uk.ac.manchester.tornado.api.types.arrays.FloatArray;  // or IntArray
-import uk.ac.manchester.tornado.api.runtime.TornadoRuntimeProvider;
-import uk.ac.manchester.tornado.api.TornadoExecutionResult;
-import uk.ac.manchester.tornado.api.TornadoProfilerResult;
-import uk.ac.manchester.tornado.api.enums.ProfilerMode;
-
-public class MyAlgorithmSingleKernelBenchmark {
-
-    private static final int DEFAULT_SIZE = 1024;
-    private static final int LOCAL_WORK_SIZE = 256;
-    private static final int WARM_UP_ITERATIONS = 50;
-    private static final int BENCHMARK_ITERATIONS = 100;
-    private static final String ENTRY_POINT = "myKernelFunction";  // Must match .cl file
-    private static final Random RANDOM = new Random(42);
-
-    public static void main(String[] args) throws TornadoExecutionPlanException {
-        if (args.length < 1) {
-            System.out.println("Usage: MyAlgorithmSingleKernelBenchmark <kernel.cl> [size]");
-            System.exit(1);
-        }
-
-        String kernelPath = args[0];
-        int size = (args.length >= 2) ? Integer.parseInt(args[1]) : DEFAULT_SIZE;
-
-        // 1. Print configuration
-        System.out.println("Kernel: " + kernelPath);
-        System.out.println("Size: " + size);
-
-        // 2. Allocate data arrays
-        FloatArray input = new FloatArray(size);
-        FloatArray output = new FloatArray(size);
-        // ... initialize data ...
-
-        TornadoDevice device = TornadoRuntimeProvider.getTornadoRuntime().getDefaultDevice();
-        System.out.println("Device: " + device);
-
-        // 3. Set up AccessorParameters (must match kernel signature)
-        AccessorParameters accessors = new AccessorParameters(N);  // N = number of params
-        accessors.set(0, input, Access.READ_ONLY);
-        accessors.set(1, output, Access.WRITE_ONLY);
-        accessors.set(2, Integer.valueOf(size), Access.NONE);
-        // ... more parameters ...
-
-        // 4. Create TaskGraph
-        TaskGraph graph = new TaskGraph("s0")
-                .transferToDevice(DataTransferMode.FIRST_EXECUTION, input)
-                .prebuiltTask("t0", ENTRY_POINT, kernelPath, accessors)
-                .transferToHost(DataTransferMode.EVERY_EXECUTION, output);
-
-        ImmutableTaskGraph snapshot = graph.snapshot();
-
-        // 5. Configure grid (1D or 2D)
-        WorkerGrid1D worker = new WorkerGrid1D(size);
-        worker.setLocalWork(LOCAL_WORK_SIZE, 1, 1);
-        GridScheduler scheduler = new GridScheduler("s0.t0", worker);
-
-        ArrayList<Long> kernelTimes = new ArrayList<>();
-
-        try (TornadoExecutionPlan plan = new TornadoExecutionPlan(snapshot)) {
-            plan.withDevice(device).withGridScheduler(scheduler);
-
-            // 6. Warmup phase
-            System.out.println("Warming up...");
-            for (int i = 0; i < WARM_UP_ITERATIONS; i++) {
-                plan.execute();
-            }
-
-            // 7. Measurement phase - KERNEL TIME ONLY
-            System.out.println("Measuring kernel time...");
-            for (int i = 0; i < BENCHMARK_ITERATIONS; i++) {
-                TornadoExecutionResult result = plan
-                        .withProfiler(ProfilerMode.SILENT)
-                        .execute();
-
-                TornadoProfilerResult profilerResult = result.getProfilerResult();
-                long kernelTime = profilerResult.getDeviceKernelTime();
-                kernelTimes.add(kernelTime);
-            }
-        }
-
-        // 8. Calculate and print statistics
-        LongSummaryStatistics stats = kernelTimes.stream()
-                .mapToLong(Long::longValue).summaryStatistics();
-
-        long totalFlops = /* calculate based on algorithm */;
-        double gflops = (totalFlops * 1e-9) / (stats.getAverage() * 1e-9);
-
-        System.out.println();
-        System.out.println("Results (KERNEL TIME ONLY)");
-        System.out.println("==========================");
-        System.out.printf("Kernel: %s%n", kernelPath);
-        System.out.printf("Avg: %.3f ms%n", stats.getAverage() / 1_000_000.0);
-        System.out.printf("Min: %.3f ms%n", stats.getMin() / 1_000_000.0);
-        System.out.printf("Max: %.3f ms%n", stats.getMax() / 1_000_000.0);
-        System.out.printf("GFLOP/s: %.2f%n", gflops);
-    }
-}
-```
-
-### Key Points
-
-1. **Entry Point**: Must match the kernel function name in the `.cl` file
-2. **AccessorParameters**: Must match kernel signature exactly (order matters)
-3. **Grid Configuration**: Use WorkerGrid1D or WorkerGrid2D based on algorithm
-4. **Warmup**: Essential to handle JIT compilation and GPU warm-up
-5. **ProfilerMode.SILENT**: Gets kernel time without printing profiler output
-
----
-
-## Kernel File Locations
-
-All kernels are stored in `~/TornadoVM-fork-2/kernels/`:
-
-```
-kernels/
-├── matrixvectorrow_generated.cl
-├── matrixvectorrow_custom.cl
-├── matrixmul2dlocalmemory_generated.cl
-├── matrixmul2dlocalmemory_custom.cl
-├── matrixmultiplication1d_generated.cl
-├── matrixmultiplication1d_custom.cl
-├── nbody_generated.cl
-├── nbody_optimized.cl
-├── nbody/
-│   ├── nbody_opt1_fp32_rsqrt.cl
-│   ├── nbody_opt2_restrict.cl
-│   ├── nbody_opt3_workgroup.cl
-│   ├── nbody_opt4_unroll.cl
-│   ├── nbody_opt5_register_cache.cl
-│   ├── nbody_opt6_scalar_accum.cl
-│   └── nbody_opt7_local_memory.cl
-├── bfs_generated.cl
-├── bfs_custom.cl
-├── mandelbrot_generated.cl
-├── mandelbrot_custom.cl
-├── montecarlo_generated.cl
-├── montecarlo_custom.cl
-├── blackscholes_generated.cl
-├── blackscholes_custom.cl
-├── blurfilter_generated.cl
-├── blurfilter_custom.cl
-├── reduction_generated.cl
-├── reduction_custom.cl
-├── opt1_restrict.cl
-├── opt2_unroll.cl
-├── opt3_workgroup.cl
-├── opt4_local_memory.cl
-└── opt5_local_unroll.cl
-```
+| Algorithm | Entry Point Function |
+|-----------|---------------------|
+| Matrix-Vector Row | `matrixVectorRowMajor` or `matrixVectorGeneric` |
+| MatrixMul 2D Local | `matrixMultiplication` |
+| MatrixMul 1D | `matrixMultiplication` |
+| NBody | `nBody` |
+| BFS | `runBFS` |
+| Mandelbrot | `mandelbrotTornado` |
+| FlashAttention | `processHeadsFlashAttention` |
 
 ---
 
 ## TornadoVM Kernel Signature
 
-Generated kernels have TornadoVM wrapper parameters:
+All kernels MUST follow this signature pattern (TornadoVM internal parameters):
 
 ```c
 __kernel void myFunction(
-    __global long *_kernel_context,      // TornadoVM internal
+    __global long *_kernel_context,      // TornadoVM internal - contains N
     __constant uchar *_constant_region,  // TornadoVM internal
     __local uchar *_local_region,        // TornadoVM internal
     __global int *_atomics,              // TornadoVM internal
     // User parameters start here:
-    __global uchar *inputArray,
+    __global uchar *inputArray,          // Cast to actual type inside
     __global uchar *outputArray,
     __private int size
 )
 ```
 
-**Important**: When creating custom kernels, keep the same signature as generated kernels.
+Access array data like this:
+```c
+const int N = (int)_kernel_context[0];
+__global const float *a = ((__global const float *)inputArray) + 4;  // +4 offset!
+```
 
 ---
 
 ## Optimization Techniques Tested
 
-### Matrix Multiplication
-1. `restrict` keyword - pointer aliasing hints
-2. Loop unrolling (4x)
-3. Explicit work-group size
-4. Local memory tiling (biggest impact ~22%)
-5. Local memory + unrolling
+### Matrix Multiplication (Progressive)
+1. **opt1_restrict.cl** - `restrict` keyword for pointer aliasing hints
+2. **opt2_unroll.cl** - 4x loop unrolling with `#pragma unroll`
+3. **opt3_workgroup.cl** - Explicit `__attribute__((reqd_work_group_size(...)))`
+4. **opt4_local_memory.cl** - Local memory tiling (~22% improvement)
+5. **opt5_local_unroll.cl** - Combines local memory + unrolling
 
-### NBody
-1. `native_rsqrt()` instead of `1.0f/sqrt()`
-2. `restrict` keyword
-3. Explicit work-group size
-4. Loop unrolling
-5. Register caching
-6. Scalar accumulators
-7. Local memory tiling
+### NBody (Progressive)
+1. **nbody_opt1_fp32_rsqrt.cl** - FP32 `rsqrt()` instead of FP64
+2. **nbody_opt2_restrict.cl** - `restrict` keyword
+3. **nbody_opt3_workgroup.cl** - Explicit work-group size
+4. **nbody_opt4_unroll.cl** - Loop unrolling
+5. **nbody_opt5_register_cache.cl** - Caching in registers
+6. **nbody_opt6_scalar_accum.cl** - Separate scalar accumulators
+7. **nbody_opt7_local_memory.cl** - Local memory tiling
+
+### Key Optimization Patterns
+- **Local memory tiling** - Biggest impact on memory-bound kernels
+- **Loop unrolling** - Reduces branch overhead, improves pipelining
+- **Register caching** - Cache frequently accessed values
+- **fma()** - Fused multiply-add for better accuracy and performance
+- **native_* functions** - Hardware-accelerated math (platform-specific)
+
+---
+
+## Creating New Benchmarks
+
+### Benchmark Class Template
+```java
+public class MyAlgorithmSingleKernelBenchmark {
+    private static final int WARM_UP_ITERATIONS = 50;
+    private static final int BENCHMARK_ITERATIONS = 100;
+    private static final String ENTRY_POINT = "myKernelFunction";
+
+    public static void main(String[] args) {
+        // 1. Parse args, setup data
+        // 2. Create AccessorParameters matching kernel signature
+        // 3. Build TaskGraph with prebuiltTask()
+        // 4. Warmup loop (no profiler)
+        // 5. Measurement loop with ProfilerMode.SILENT
+        //    - Collect getDeviceKernelTime() only
+        // 6. Calculate statistics and domain-specific metrics
+    }
+}
+```
+
+### Validator Class Template
+```java
+public class MyAlgorithmValidator {
+    private static final float TOLERANCE = 1e-4f;
+
+    public static void main(String[] args) {
+        // 1. Smaller problem size than benchmark
+        // 2. Compute sequential reference on CPU
+        // 3. Run kernel once
+        // 4. Compare with tolerance
+        // 5. Report pass/fail with error details
+    }
+}
+```
 
 ---
 
 ## Troubleshooting
 
-### "Error: could not open tornado-argfile"
-```bash
-source setvars.sh
-```
-
-### "ClassNotFoundException"
-```bash
-make  # Rebuild after adding new Java files
-```
-
-### "clCreateKernel -> Returned: -46" (Invalid kernel name)
-Entry point name in benchmark doesn't match function name in `.cl` file.
-
-### "file does not exist: kernels/..."
-Check kernel file path and name.
+| Error | Solution |
+|-------|----------|
+| `could not open tornado-argfile` | Run `source setvars.sh` |
+| `ClassNotFoundException` | Run `make` to rebuild |
+| `clCreateKernel -> Returned: -46` | Entry point name mismatch |
+| `file does not exist: kernels/...` | Check kernel file path |
+| Large numerical differences | Check `+4` offset for float arrays |
 
 ---
 
@@ -551,7 +289,7 @@ Check kernel file path and name.
 cd ~/TornadoVM-fork-2
 source setvars.sh
 
-# Rebuild
+# Rebuild after Java changes
 make
 
 # Run any benchmark
@@ -559,4 +297,21 @@ java --enable-preview @${TORNADO_SDK}/tornado-argfile \
   -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
   uk.ac.manchester.tornado.examples.compute.custom.<ClassName> \
   kernels/<kernel>.cl [params]
+
+# Generate kernel from TornadoVM example
+tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.<Example>
 ```
+
+---
+
+## For AI Assistants
+
+When helping with this project:
+
+1. **Always validate first** - Run validator before trusting benchmark results
+2. **One kernel per run** - Don't compare kernels in same execution
+3. **Preserve TornadoVM signature** - Keep the 4 internal parameters
+4. **Use +4 float offset** - Array data starts at index 4, not 0
+5. **Match entry point names** - Benchmark ENTRY_POINT must match kernel function name
+6. **Consider work-group limits** - Apple M4 max is 32; NVIDIA can do 256+
+7. **Test optimizations progressively** - Isolate each optimization's impact
