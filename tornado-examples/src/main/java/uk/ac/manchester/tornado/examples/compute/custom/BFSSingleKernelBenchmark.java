@@ -33,7 +33,10 @@ import uk.ac.manchester.tornado.api.enums.ProfilerMode;
 public class BFSSingleKernelBenchmark {
 
     private static final int DEFAULT_NUM_NODES = 2000;
-    private static final int LOCAL_WORK_SIZE = 16;
+    // Apple M4 max work-group is 32 threads
+    // Use 4×8 = 32 or 8×4 = 32 for 2D grid
+    private static final int LOCAL_WORK_SIZE_X = 4;
+    private static final int LOCAL_WORK_SIZE_Y = 8;
     private static final int WARM_UP_ITERATIONS = 5;
     private static final int BENCHMARK_ITERATIONS = 20;
     private static final int MAX_BFS_LEVELS = 100;
@@ -120,14 +123,18 @@ public class BFSSingleKernelBenchmark {
 
         ImmutableTaskGraph snapshot = graph.snapshot();
 
-        // Calculate local work size
-        int localSize = LOCAL_WORK_SIZE;
-        while (numNodes % localSize != 0 && localSize > 1) {
-            localSize--;
+        // Calculate local work size for Apple M4 (max 32 threads per work-group)
+        int localSizeX = LOCAL_WORK_SIZE_X;
+        int localSizeY = LOCAL_WORK_SIZE_Y;
+        while (numNodes % localSizeX != 0 && localSizeX > 1) {
+            localSizeX--;
+        }
+        while (numNodes % localSizeY != 0 && localSizeY > 1) {
+            localSizeY--;
         }
 
         WorkerGrid2D worker = new WorkerGrid2D(numNodes, numNodes);
-        worker.setLocalWork(localSize, localSize, 1);
+        worker.setLocalWork(localSizeX, localSizeY, 1);
         GridScheduler scheduler = new GridScheduler("s0.t0", worker);
 
         ArrayList<Long> totalKernelTimes = new ArrayList<>();

@@ -25,7 +25,10 @@ import uk.ac.manchester.tornado.api.runtime.TornadoRuntimeProvider;
 public class BFSValidator {
 
     private static final int DEFAULT_NUM_NODES = 1000;
-    private static final int LOCAL_WORK_SIZE = 16;
+    // Apple M4 max work-group is 32 threads
+    // Use 4×8 = 32 for 2D grid
+    private static final int LOCAL_WORK_SIZE_X = 4;
+    private static final int LOCAL_WORK_SIZE_Y = 8;
     private static final int MAX_BFS_LEVELS = 100;
     private static final String ENTRY_POINT = "runBFS";
     private static final Random RANDOM = new Random(42);
@@ -208,13 +211,17 @@ public class BFSValidator {
 
             ImmutableTaskGraph snapshot = graph.snapshot();
 
-            int localSize = LOCAL_WORK_SIZE;
-            while (numNodes % localSize != 0 && localSize > 1) {
-                localSize--;
+            int localSizeX = LOCAL_WORK_SIZE_X;
+            int localSizeY = LOCAL_WORK_SIZE_Y;
+            while (numNodes % localSizeX != 0 && localSizeX > 1) {
+                localSizeX--;
+            }
+            while (numNodes % localSizeY != 0 && localSizeY > 1) {
+                localSizeY--;
             }
 
             WorkerGrid2D worker = new WorkerGrid2D(numNodes, numNodes);
-            worker.setLocalWork(localSize, localSize, 1);
+            worker.setLocalWork(localSizeX, localSizeY, 1);
             GridScheduler scheduler = new GridScheduler("validate.t0", worker);
 
             try (TornadoExecutionPlan plan = new TornadoExecutionPlan(snapshot)) {

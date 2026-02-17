@@ -24,10 +24,11 @@ import uk.ac.manchester.tornado.api.runtime.TornadoRuntimeProvider;
  */
 public class FlashAttentionValidator {
 
-    private static final int DEFAULT_N_HEADS = 8;      // Smaller for validation
-    private static final int DEFAULT_HEAD_SIZE = 64;
-    private static final int DEFAULT_CONTEXT_LENGTH = 256;
-    private static final int DEFAULT_KV_HEADS = 2;
+    // MUST match the hardcoded values in the generated kernel!
+    private static final int DEFAULT_N_HEADS = 32;
+    private static final int DEFAULT_HEAD_SIZE = 128;
+    private static final int DEFAULT_CONTEXT_LENGTH = 256;  // Can be smaller for validation
+    private static final int DEFAULT_KV_HEADS = 8;  // kvDim = 8 * 128 = 1024
 
     private static final String ENTRY_POINT = "processHeadsFlashAttention";
     private static final float TOLERANCE = 1e-2f;  // Relative tolerance

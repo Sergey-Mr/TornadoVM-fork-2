@@ -1,0 +1,75 @@
+WARNING: Using incubator modules: jdk.incubator.vector
+Computing MxM of 512x512
+#pragma OPENCL EXTENSION cl_khr_fp16 : enable  
+__kernel void matrixMultiplication(__global long *_kernel_context, __constant uchar *_constant_region, __local uchar *_local_region, __global int *_atomics, __global uchar *matrixA, __global uchar *matrixB, __global uchar *result, __private int size)
+{
+  int i_5, i_4, i_3, i_32, i_31, i_13, i_11, i_10, i_9, i_8, i_7, i_6, i_20, i_19, i_14, i_27, i_26; 
+  float f_25, f_12, f_24, f_18; 
+  ulong ul_30, ul_0, ul_1, ul_17, ul_2, ul_23; 
+  long l_15, l_16, l_21, l_22, l_29, l_28; 
+
+  // BLOCK 0
+  ul_0  =  (ulong) matrixA;
+  ul_1  =  (ulong) matrixB;
+  ul_2  =  (ulong) result;
+  i_3  =  get_global_size(0);
+  i_4  =  get_global_size(1);
+  i_5  =  get_global_id(0);
+  i_6  =  get_global_id(1);
+  // BLOCK 1 MERGES [0 8 ]
+  i_7  =  i_6;
+  for(;i_7 < 512;)
+  {
+    // BLOCK 2
+    i_8  =  i_7 << 9;
+    i_9  =  i_8 + 4;
+    // BLOCK 3 MERGES [2 7 ]
+    i_10  =  i_5;
+    for(;i_10 < 512;)
+    {
+      // BLOCK 4
+      i_11  =  i_10 + 4;
+      // BLOCK 5 MERGES [4 6 ]
+      f_12  =  0.0F;
+      i_13  =  0;
+      for(;i_13 < 512;)
+      {
+        // BLOCK 6
+        i_14  =  i_9 + i_13;
+        l_15  =  (long) i_14;
+        l_16  =  l_15 << 2;
+        ul_17  =  ul_0 + l_16;
+        f_18  =  *((__global float *) ul_17);
+        i_19  =  i_13 << 9;
+        i_20  =  i_19 + i_11;
+        l_21  =  (long) i_20;
+        l_22  =  l_21 << 2;
+        ul_23  =  ul_1 + l_22;
+        f_24  =  *((__global float *) ul_23);
+        f_25  =  fma(f_18, f_24, f_12);
+        i_26  =  i_13 + 1;
+        f_12  =  f_25;
+        i_13  =  i_26;
+      }  // B6
+      // BLOCK 7
+      i_27  =  i_10 + i_9;
+      l_28  =  (long) i_27;
+      l_29  =  l_28 << 2;
+      ul_30  =  ul_2 + l_29;
+      *((__global float *) ul_30)  =  f_12;
+      i_31  =  i_3 + i_10;
+      i_10  =  i_31;
+    }  // B7
+    // BLOCK 8
+    i_32  =  i_4 + i_7;
+    i_7  =  i_32;
+  }  // B8
+  // BLOCK 9
+  return;
+}  //  kernel
+
+	Single Threaded CPU Execution: 3.31 GFlops, Total time = 81 ms
+	TornadoVM Execution on GPU (Accelerated): 268.44 GFlops, Total Time = 1 ms
+	Speedup: 81.0x
+	Verification true
+

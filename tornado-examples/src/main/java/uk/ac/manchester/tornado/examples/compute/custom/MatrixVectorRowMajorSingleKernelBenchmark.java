@@ -30,7 +30,7 @@ public class MatrixVectorRowMajorSingleKernelBenchmark {
 
     private static final int INPUT_DIM = 8192;
     private static final int OUTPUT_DIM = 2048;
-    private static final int LOCAL_WORK_GROUP_SIZE = 128;
+    private static final int LOCAL_WORK_GROUP_SIZE = 32;  // Apple M4 Max limit
     private static final int WARM_UP_ITERATIONS = 100;
     private static final int BENCHMARK_ITERATIONS = 200;
     private static final String ENTRY_POINT = "matrixVectorGeneric";

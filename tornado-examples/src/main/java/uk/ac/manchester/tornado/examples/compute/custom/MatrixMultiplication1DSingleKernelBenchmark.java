@@ -31,7 +31,10 @@ import uk.ac.manchester.tornado.api.enums.ProfilerMode;
 public class MatrixMultiplication1DSingleKernelBenchmark {
 
     private static final int DEFAULT_SIZE = 1024;
-    private static final int LOCAL_WORK_SIZE = 16;
+    // Apple M4 supports max 32 threads per work-group
+    // Use 4x8 = 32 for tiled kernel, or 4x4 = 16 for WPT kernel
+    private static final int LOCAL_WORK_SIZE_X = 4;  // Columns
+    private static final int LOCAL_WORK_SIZE_Y = 8;  // Rows (4x8 = 32 threads)
     private static final int WARM_UP_ITERATIONS = 50;
     private static final int BENCHMARK_ITERATIONS = 100;
     private static final String ENTRY_POINT = "matrixMultiplication";
@@ -84,8 +87,9 @@ public class MatrixMultiplication1DSingleKernelBenchmark {
         ImmutableTaskGraph snapshot = graph.snapshot();
 
         // 2D grid: one thread per output element
+        // Apple M4 max work-group size is 32, so use 4x8 = 32
         WorkerGrid2D worker = new WorkerGrid2D(size, size);
-        worker.setLocalWork(LOCAL_WORK_SIZE, LOCAL_WORK_SIZE, 1);
+        worker.setLocalWork(LOCAL_WORK_SIZE_X, LOCAL_WORK_SIZE_Y, 1);
         GridScheduler scheduler = new GridScheduler("s0.t0", worker);
 
         ArrayList<Long> kernelTimes = new ArrayList<>();
