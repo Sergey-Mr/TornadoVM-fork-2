@@ -157,26 +157,134 @@ java --enable-preview @${TORNADO_SDK}/tornado-argfile \
 
 ---
 
-## How to Generate Kernels from TornadoVM
+## Generating OpenCL Kernels from TornadoVM
 
-Use `--printKernel` flag to see generated OpenCL:
+TornadoVM compiles Java code to OpenCL at runtime. Use `--printKernel` to extract the generated OpenCL source.
+
+### Step 1: Run TornadoVM Example with --printKernel
+
 ```bash
-tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.<ExampleClass> 2>&1 | tee output.txt
+# General format
+tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.<package>.<ClassName> [--params="args"]
+
+# Output goes to stderr, so redirect both streams
+tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.MatrixMultiplication1D 2>&1 | tee output.txt
 ```
 
-Extract the `__kernel void ...` section and save to `kernels/<name>_generated.cl`.
+### Step 2: Extract the Kernel
+
+The output contains the full OpenCL kernel. Look for `__kernel void` and extract everything from there to the closing `}`:
+
+```c
+#pragma OPENCL EXTENSION cl_khr_fp64 : enable
+#pragma OPENCL EXTENSION cl_khr_int64_base_atomics : enable
+
+__kernel void matrixMultiplication(
+    __global long *_kernel_context,
+    __constant uchar *_constant_region,
+    __local uchar *_local_region,
+    __global int *_atomics,
+    __global uchar *A,
+    __global uchar *B,
+    __global uchar *C,
+    __private int size)
+{
+    // ... kernel body ...
+}
+```
+
+### Step 3: Save to File
+
+Save the extracted kernel to `kernels/<algorithm>_generated.cl`.
+
+### Available TornadoVM Examples
+
+```bash
+# Matrix Multiplication (1D arrays)
+tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.MatrixMultiplication1D
+
+# Matrix Multiplication 2D with Local Memory
+tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.kernelcontext.matrices.MatrixMul2DLocalMemory
+
+# Matrix-Vector Multiplication
+tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.MatrixVector
+
+# NBody Simulation
+tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.NBody --params="2048 1"
+
+# BFS Graph Traversal
+tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.BFS
+
+# Mandelbrot Fractal
+tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.Mandelbrot
+
+# MonteCarlo Simulation
+tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.MonteCarlo
+
+# BlackScholes Option Pricing
+tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.BlackScholes
+
+# Blur Filter (Image Processing)
+tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.BlurFilter
+
+# Reduction (Sum of Floats)
+tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.reductions.ReductionAddFloats
+```
 
 ### Kernel Entry Points
 
-| Algorithm | Entry Point Function |
-|-----------|---------------------|
-| Matrix-Vector Row | `matrixVectorRowMajor` or `matrixVectorGeneric` |
-| MatrixMul 2D Local | `matrixMultiplication` |
-| MatrixMul 1D | `matrixMultiplication` |
-| NBody | `nBody` |
-| BFS | `runBFS` |
-| Mandelbrot | `mandelbrotTornado` |
-| FlashAttention | `processHeadsFlashAttention` |
+The entry point name in the benchmark **must exactly match** the kernel function name:
+
+| Algorithm | Entry Point | TornadoVM Example Class |
+|-----------|-------------|------------------------|
+| Matrix-Vector Row | `matrixVectorRowMajor` | `MatrixVector` |
+| MatrixMul 2D Local | `matrixMultiplication` | `MatrixMul2DLocalMemory` |
+| MatrixMul 1D | `matrixMultiplication` | `MatrixMultiplication1D` |
+| NBody | `nBody` | `NBody` |
+| BFS | `runBFS` | `BFS` |
+| Mandelbrot | `mandelbrotTornado` | `Mandelbrot` |
+| MonteCarlo | `computeMontecarlo` | `MonteCarlo` |
+| BlackScholes | `blackScholesKernel` | `BlackScholes` |
+| BlurFilter | `compute` | `BlurFilter` |
+| Reduction | `reductionAddFloats` | `ReductionAddFloats` |
+
+### Complete Workflow Example
+
+```bash
+# 1. Generate kernel from TornadoVM
+tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.NBody --params="2048 1" 2>&1 | tee nbody_output.txt
+
+# 2. Extract kernel to file (manually or with script)
+# Look for "__kernel void nBody" and save to kernels/nbody_generated.cl
+
+# 3. Create optimized version
+cp kernels/nbody_generated.cl kernels/nbody_custom.cl
+# Edit nbody_custom.cl with optimizations
+
+# 4. Validate both kernels produce correct results
+java --enable-preview @${TORNADO_SDK}/tornado-argfile \
+  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
+  uk.ac.manchester.tornado.examples.compute.custom.NBodyValidator \
+  kernels/nbody_generated.cl kernels/nbody_custom.cl --bodies=1024
+
+# 5. Benchmark each kernel SEPARATELY
+java --enable-preview @${TORNADO_SDK}/tornado-argfile \
+  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
+  uk.ac.manchester.tornado.examples.compute.custom.NBodySingleKernelBenchmark \
+  kernels/nbody_generated.cl 16384
+
+java --enable-preview @${TORNADO_SDK}/tornado-argfile \
+  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
+  uk.ac.manchester.tornado.examples.compute.custom.NBodySingleKernelBenchmark \
+  kernels/nbody_custom.cl 16384
+```
+
+### Tips for Kernel Extraction
+
+1. **OpenCL Extensions**: Keep the `#pragma OPENCL EXTENSION` lines at the top
+2. **Multiple Kernels**: Some examples generate multiple kernels - extract the one you need
+3. **Helper Functions**: If the kernel calls helper functions, include those too
+4. **Constants**: Some kernels use `#define` for tile sizes - keep those
 
 ---
 
@@ -300,6 +408,105 @@ java --enable-preview @${TORNADO_SDK}/tornado-argfile \
 
 # Generate kernel from TornadoVM example
 tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.<Example>
+```
+
+---
+
+## PTX Kernel Benchmarking (NVIDIA CUDA)
+
+### Generating PTX Kernels
+
+PTX is NVIDIA's intermediate assembly language. Generate PTX using:
+
+```bash
+# Force PTX backend and print kernel
+tornado --printKernel -Dtornado.ptx.priority=100 \
+  -m tornado.examples/uk.ac.manchester.tornado.examples.compute.<Example> 2>&1 | tee ptx_output.txt
+```
+
+### PTX Kernel Structure
+
+```ptx
+.visible .entry s0_t0_matrixMultiplication(
+    .param .u64 .ptr .global .align 8 kernel_context,
+    .param .u64 .ptr .global .align 8 A,
+    .param .u64 .ptr .global .align 8 B,
+    .param .u64 .ptr .global .align 8 C,
+    .param .s32 size
+) {
+    .reg .s64 rsd<10>;
+    .reg .f32 rf<20>;
+    // ... PTX instructions ...
+}
+```
+
+### Available PTX Benchmarks
+
+| Algorithm | PTX Benchmark Class | Entry Point |
+|-----------|---------------------|-------------|
+| Matrix-Vector Row | `MatrixVectorRowMajorPTXBenchmark` | `matrixVectorGeneric` |
+| MatrixMul 2D Local | `MatrixMul2DLocalMemoryPTXBenchmark` | `matrixMultiplication` |
+| MatrixMul 1D | `MatrixMultiplication1DPTXBenchmark` | `matrixMultiplication` |
+| NBody | `NBodyPTXBenchmark` | `nBody` |
+| BFS | `BFSPTXBenchmark` | `runBFS` |
+| Pi Computation | `PiComputationPTXBenchmark` | `computePi` |
+| FlashAttention | `FlashAttentionPTXBenchmark` | `processHeadsFlashAttention` |
+
+### Running PTX Benchmarks
+
+```bash
+# Same pattern as OpenCL - just use .ptx file
+java --enable-preview @${TORNADO_SDK}/tornado-argfile \
+  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
+  uk.ac.manchester.tornado.examples.compute.custom.NBodyPTXBenchmark \
+  kernels/ptx/nbody_generated.ptx 16384
+```
+
+### PTX Workflow
+
+```bash
+# Step 1: Generate PTX kernel
+tornado --printKernel -Dtornado.ptx.priority=100 \
+  -m tornado.examples/uk.ac.manchester.tornado.examples.compute.NBody --params="2048 1" 2>&1 | tee nbody_ptx.txt
+
+# Step 2: Extract PTX (look for ".visible .entry" section)
+# Save to kernels/ptx/nbody_generated.ptx
+
+# Step 3: Find entry point name (may differ from OpenCL!)
+grep ".visible .entry" kernels/ptx/nbody_generated.ptx
+
+# Step 4: Update ENTRY_POINT in benchmark if needed
+
+# Step 5: Build and run
+make
+java --enable-preview @${TORNADO_SDK}/tornado-argfile \
+  -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
+  uk.ac.manchester.tornado.examples.compute.custom.NBodyPTXBenchmark \
+  kernels/ptx/nbody_generated.ptx 16384
+```
+
+### PTX Optimization Techniques
+
+| OpenCL | PTX Equivalent |
+|--------|----------------|
+| `__local float[]` | `.shared .f32 tile[]` |
+| `barrier()` | `bar.sync 0;` |
+| `fma(a,b,c)` | `fma.rn.f32 result, a, b, c;` |
+| `native_rsqrt()` | `rsqrt.approx.f32` |
+| `get_global_id(0)` | `%ctaid.x * %ntid.x + %tid.x` |
+
+### PTX Kernel Files Location
+
+```
+kernels/ptx/
+├── matrixvector_generated.ptx
+├── matrixvector_custom.ptx
+├── matrix2d_generated.ptx
+├── matrix1d_generated.ptx
+├── nbody_generated.ptx
+├── bfs_generated.ptx
+├── picomputation_generated.ptx
+└── flashattention_generated.ptx
 ```
 
 ---
