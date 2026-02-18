@@ -37,7 +37,13 @@ import uk.ac.manchester.tornado.api.enums.ProfilerMode;
  *
  * Otherwise you'll get: cuModuleLoadData -> Returned: 218 (CUDA_ERROR_INVALID_PTX)
  *
- * NOTE: Update ENTRY_POINT to match your generated PTX kernel function name.
+ * IMPORTANT - Size must match PTX:
+ * The PTX function name includes the problem size (e.g., matrixmultiplication_..._512).
+ * You MUST run the benchmark with the same size the PTX was generated with.
+ *
+ * IMPORTANT - Task Graph Naming:
+ * This benchmark uses TaskGraph("cuda_old_api") to match the PTX naming convention
+ * from MatrixMul2DLocalMemory example which uses cuda_old_api_t0_ prefix.
  */
 public class MatrixMul2DLocalMemoryPTXBenchmark {
 
@@ -98,7 +104,7 @@ public class MatrixMul2DLocalMemoryPTXBenchmark {
         accessors.set(2, matrixC, Access.WRITE_ONLY);
         accessors.set(3, Integer.valueOf(size), Access.NONE);
 
-        TaskGraph graph = new TaskGraph("s0")
+        TaskGraph graph = new TaskGraph("cuda_old_api")
                 .transferToDevice(DataTransferMode.FIRST_EXECUTION, matrixA, matrixB)
                 .prebuiltTask("t0", ENTRY_POINT, kernelPath, accessors)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, matrixC);
@@ -108,7 +114,7 @@ public class MatrixMul2DLocalMemoryPTXBenchmark {
         // 2D grid: global work = (size, size), local work = (TS, TS)
         WorkerGrid2D worker = new WorkerGrid2D(size, size);
         worker.setLocalWork(TS, TS, 1);
-        GridScheduler scheduler = new GridScheduler("s0.t0", worker);
+        GridScheduler scheduler = new GridScheduler("cuda_old_api.t0", worker);
 
         ArrayList<Long> kernelTimes = new ArrayList<>();
 
