@@ -29,6 +29,14 @@ import uk.ac.manchester.tornado.api.enums.ProfilerMode;
  *
  * Defaults: nHeads=32, headSize=128, contextLength=2048
  *
+ * IMPORTANT - PTX File Preparation:
+ * TornadoVM's prebuiltTask() automatically adds PTX headers (.version, .target, .address_size).
+ * If your PTX file already contains these headers, you MUST strip them first:
+ *
+ *   sed -i '/^\.version/d; /^\.target/d; /^\.address_size/d' kernel.ptx
+ *
+ * Otherwise you'll get: cuModuleLoadData -> Returned: 218 (CUDA_ERROR_INVALID_PTX)
+ *
  * NOTE: Update ENTRY_POINT to match your generated PTX kernel function name.
  */
 public class FlashAttentionPTXBenchmark {

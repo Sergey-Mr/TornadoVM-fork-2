@@ -29,6 +29,14 @@ import uk.ac.manchester.tornado.api.enums.ProfilerMode;
  * Default size: 1024x1024
  * Tile size (TS): 16 or 32 depending on kernel
  *
+ * IMPORTANT - PTX File Preparation:
+ * TornadoVM's prebuiltTask() automatically adds PTX headers (.version, .target, .address_size).
+ * If your PTX file already contains these headers, you MUST strip them first:
+ *
+ *   sed -i '/^\.version/d; /^\.target/d; /^\.address_size/d' kernel.ptx
+ *
+ * Otherwise you'll get: cuModuleLoadData -> Returned: 218 (CUDA_ERROR_INVALID_PTX)
+ *
  * NOTE: Update ENTRY_POINT to match your generated PTX kernel function name.
  */
 public class MatrixMul2DLocalMemoryPTXBenchmark {

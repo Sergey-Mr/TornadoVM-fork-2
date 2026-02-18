@@ -414,20 +414,70 @@ tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.comp
 
 ## PTX Kernel Benchmarking (NVIDIA CUDA)
 
+### Prerequisites: PTX Backend
+
+TornadoVM must be built with PTX backend support:
+
+```bash
+# Install with PTX backend (instead of OpenCL)
+./bin/tornadovm-installer --jdk jdk21 --backend ptx
+
+# Or with both backends
+./bin/tornadovm-installer --jdk jdk21 --backend opencl,ptx
+
+# After rebuild, update environment
+source setvars.sh
+```
+
 ### Generating PTX Kernels
 
 PTX is NVIDIA's intermediate assembly language. Generate PTX using:
 
 ```bash
-# Force PTX backend and print kernel
-tornado --printKernel -Dtornado.ptx.priority=100 \
+# With PTX-only backend (no extra flags needed)
+tornado --printKernel -m tornado.examples/uk.ac.manchester.tornado.examples.compute.NBody --params="2048 1" 2>&1 | tee ptx_output.txt
+
+# With multi-backend installation, force PTX priority
+tornado --printKernel --jvm="-Dtornado.ptx.priority=100" \
   -m tornado.examples/uk.ac.manchester.tornado.examples.compute.<Example> 2>&1 | tee ptx_output.txt
 ```
 
-### PTX Kernel Structure
+### CRITICAL: Preparing PTX for prebuiltTask
+
+**TornadoVM's `prebuiltTask()` automatically adds PTX headers.** If your PTX file already has headers, you'll get CUDA error 218 (INVALID_PTX).
+
+#### Generated PTX (from --printKernel) - WILL NOT WORK as-is:
+```ptx
+.version 7.8              <-- REMOVE THESE
+.target sm_52             <-- REMOVE THESE
+.address_size 64          <-- REMOVE THESE
+
+ .visible .entry s0_t0_nBody_2048_...(...) {
+    ...
+ }
+```
+
+#### Correct format for prebuiltTask:
+```ptx
+ .visible .entry s0_t0_nBody_2048_...(.param .u64 .ptr .global .align 8 kernel_context, ...) {
+    .reg .s64 rsd<3>;
+    ...
+ }
+```
+
+#### How to Strip Headers
+
+```bash
+# Using sed - removes lines starting with .version, .target, .address_size
+sed -i '/^\.version/d; /^\.target/d; /^\.address_size/d' kernels/ptx/nbody_generated.ptx
+
+# Or manually edit the file and delete the first 3 lines
+```
+
+### PTX Kernel Structure (after stripping headers)
 
 ```ptx
-.visible .entry s0_t0_matrixMultiplication(
+ .visible .entry s0_t0_matrixMultiplication(
     .param .u64 .ptr .global .align 8 kernel_context,
     .param .u64 .ptr .global .align 8 A,
     .param .u64 .ptr .global .align 8 B,
@@ -466,24 +516,37 @@ java --enable-preview @${TORNADO_SDK}/tornado-argfile \
 
 ```bash
 # Step 1: Generate PTX kernel
-tornado --printKernel -Dtornado.ptx.priority=100 \
+tornado --printKernel \
   -m tornado.examples/uk.ac.manchester.tornado.examples.compute.NBody --params="2048 1" 2>&1 | tee nbody_ptx.txt
 
 # Step 2: Extract PTX (look for ".visible .entry" section)
 # Save to kernels/ptx/nbody_generated.ptx
 
-# Step 3: Find entry point name (may differ from OpenCL!)
+# Step 3: CRITICAL - Strip headers (or get CUDA error 218!)
+sed -i '/^\.version/d; /^\.target/d; /^\.address_size/d' kernels/ptx/nbody_generated.ptx
+
+# Step 4: Find entry point name (may differ from OpenCL!)
 grep ".visible .entry" kernels/ptx/nbody_generated.ptx
+# Example output: s0_t0_nbody_2048_arrays_floatarray_arrays_floatarray_0_005_500_0
 
-# Step 4: Update ENTRY_POINT in benchmark if needed
+# Step 5: Update ENTRY_POINT in benchmark Java file if needed
+# The entry point is the function name after ".visible .entry"
 
-# Step 5: Build and run
+# Step 6: Build and run
 make
 java --enable-preview @${TORNADO_SDK}/tornado-argfile \
   -cp "bin/examples:${TORNADO_SDK}/share/java/tornado/*" \
   uk.ac.manchester.tornado.examples.compute.custom.NBodyPTXBenchmark \
   kernels/ptx/nbody_generated.ptx 16384
 ```
+
+### Common PTX Errors
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `cuModuleLoadData -> Returned: 218` | PTX file has duplicate headers | Strip `.version`, `.target`, `.address_size` lines |
+| `Invalid kernel name` | Entry point mismatch | Update `ENTRY_POINT` in Java benchmark |
+| `No PTX backend found` | TornadoVM built without PTX | Rebuild with `--backend ptx` |
 
 ### PTX Optimization Techniques
 

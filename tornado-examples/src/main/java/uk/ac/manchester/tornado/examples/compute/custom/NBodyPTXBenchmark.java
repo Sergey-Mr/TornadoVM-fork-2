@@ -28,7 +28,19 @@ import uk.ac.manchester.tornado.api.enums.ProfilerMode;
  *
  * Default numBodies: 16384
  *
+ * IMPORTANT - PTX File Preparation:
+ * TornadoVM's prebuiltTask() automatically adds PTX headers (.version, .target, .address_size).
+ * If your PTX file already contains these headers, you MUST strip them first:
+ *
+ *   sed -i '/^\.version/d; /^\.target/d; /^\.address_size/d' kernel.ptx
+ *
+ * Otherwise you'll get: cuModuleLoadData -> Returned: 218 (CUDA_ERROR_INVALID_PTX)
+ *
+ * The PTX file should start directly with:
+ *   .visible .entry s0_t0_nBody_...(...)
+ *
  * NOTE: Update ENTRY_POINT to match your generated PTX kernel function name.
+ * Find it with: grep ".visible .entry" kernel.ptx
  */
 public class NBodyPTXBenchmark {
 
