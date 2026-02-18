@@ -41,11 +41,11 @@ public class MatrixVectorRowMajorPTXBenchmark {
 
     private static final int DEFAULT_INPUT_DIM = 8192;
     private static final int DEFAULT_OUTPUT_DIM = 2048;
-    private static final int LOCAL_WORK_GROUP_SIZE = 256;  // NVIDIA typically uses 256
+    private static final int LOCAL_WORK_GROUP_SIZE = 32;  // Must match PTX kernel
     private static final int WARM_UP_ITERATIONS = 100;
     private static final int BENCHMARK_ITERATIONS = 200;
 
-    // TODO: Update this after generating PTX kernel - check the .ptx file for actual entry point name
+    // Entry point must be lowercase to match generated PTX naming convention
     private static final String ENTRY_POINT = "matrixVectorGeneric";
 
     private static final Random RANDOM = new Random(42);
