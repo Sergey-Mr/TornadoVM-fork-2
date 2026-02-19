@@ -79,10 +79,10 @@ public class PiComputationTwoKernelPTXBenchmark {
         System.out.println("Device: " + device);
 
         // === Task 1: Compute kernel ===
-        AccessorParameters computeAccessors = new AccessorParameters(3);
+        // PTX signature: (kernel_context, input, result) - kernel_context added by TornadoVM
+        AccessorParameters computeAccessors = new AccessorParameters(2);
         computeAccessors.set(0, input, Access.READ_ONLY);
         computeAccessors.set(1, result, Access.READ_WRITE);
-        // Note: No explicit size parameter - kernel uses hardcoded 8192 loop bound
 
         TaskGraph computeGraph = new TaskGraph("s0")
                 .transferToDevice(DataTransferMode.FIRST_EXECUTION, input)
@@ -97,7 +97,8 @@ public class PiComputationTwoKernelPTXBenchmark {
         GridScheduler computeScheduler = new GridScheduler("s0.t0", computeWorker);
 
         // === Task 2: Reduce kernel ===
-        AccessorParameters reduceAccessors = new AccessorParameters(3);
+        // PTX signature: (kernel_context, array, size) - kernel_context added by TornadoVM
+        AccessorParameters reduceAccessors = new AccessorParameters(2);
         reduceAccessors.set(0, result, Access.READ_WRITE);
         reduceAccessors.set(1, Long.valueOf(numWorkGroups + 1), Access.NONE);
 
