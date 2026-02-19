@@ -200,7 +200,7 @@ public class BFSValidator {
             AccessorParameters accessors = new AccessorParameters(5);
             accessors.set(0, kernelVertices, Access.READ_WRITE);
             accessors.set(1, adjacencyMatrix, Access.READ_ONLY);
-            accessors.set(2, Integer.valueOf(numNodes), Access.NONE);
+            accessors.set(2, Long.valueOf(numNodes), Access.NONE);
             accessors.set(3, modify, Access.READ_WRITE);
             accessors.set(4, currentDepth, Access.READ_ONLY);
 
