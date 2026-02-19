@@ -30,13 +30,14 @@ import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
  *
  * The PTX file must contain both kernels with these entry points:
  * - s0_t0_computepi_arrays_floatarray_arrays_floatarray
- * - s0_t1_radd_arrays_floatarray_9
+ * - s0_t1_radd_arrays_floatarray_<partialSumCount>
  *
- * Default size: 16777216 (16M terms)
+ * IMPORTANT: The reduce kernel function name includes the partial sum count.
+ * Default size: 8192 (matches original PiComputation, produces 9 partial sums)
  */
 public class PiComputationTwoKernelPTXBenchmark {
 
-    private static final int DEFAULT_SIZE = 16777216;
+    private static final int DEFAULT_SIZE = 8192;  // Must match PTX generation size
     private static final int LOCAL_WORK_SIZE = 1024;  // Must match shared memory size in PTX
     private static final int WARM_UP_ITERATIONS = 50;
     private static final int BENCHMARK_ITERATIONS = 100;
@@ -97,20 +98,21 @@ public class PiComputationTwoKernelPTXBenchmark {
         GridScheduler computeScheduler = new GridScheduler("s0.t0", computeWorker);
 
         // === Task 2: Reduce kernel ===
-        // PTX signature: (kernel_context, array, size) - kernel_context added by TornadoVM
+        // PTX function: s0_t1_radd_arrays_floatarray_<size>
+        // Uses same task graph name "s0" but different task "t1" to match PTX naming
         AccessorParameters reduceAccessors = new AccessorParameters(2);
         reduceAccessors.set(0, result, Access.READ_WRITE);
         reduceAccessors.set(1, Long.valueOf(numWorkGroups + 1), Access.NONE);
 
-        TaskGraph reduceGraph = new TaskGraph("s1")
+        TaskGraph reduceGraph = new TaskGraph("s0")  // Same as compute graph to match PTX naming
                 .transferToDevice(DataTransferMode.EVERY_EXECUTION, result)
-                .prebuiltTask("t1", REDUCE_ENTRY, kernelPath, reduceAccessors)
+                .prebuiltTask("t1", REDUCE_ENTRY, kernelPath, reduceAccessors)  // t1 to match s0_t1_radd
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, result);
 
         ImmutableTaskGraph reduceSnapshot = reduceGraph.snapshot();
 
         WorkerGrid1D reduceWorker = new WorkerGrid1D(1);
-        GridScheduler reduceScheduler = new GridScheduler("s1.t1", reduceWorker);
+        GridScheduler reduceScheduler = new GridScheduler("s0.t1", reduceWorker);  // s0.t1 to match
 
         ArrayList<Long> kernelTimes = new ArrayList<>();
 
