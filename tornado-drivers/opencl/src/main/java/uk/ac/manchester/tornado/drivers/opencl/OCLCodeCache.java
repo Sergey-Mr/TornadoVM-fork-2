@@ -57,7 +57,6 @@ import uk.ac.manchester.tornado.runtime.common.Tornado;
 import uk.ac.manchester.tornado.runtime.common.TornadoLogger;
 import uk.ac.manchester.tornado.runtime.common.TornadoOptions;
 import uk.ac.manchester.tornado.runtime.tasks.meta.TaskDataContext;
-import uk.ac.manchester.tornado.api.mcp.MCPKernelOptimizer;
 
 public class OCLCodeCache {
 
@@ -106,11 +105,6 @@ public class OCLCodeCache {
     private HashMap<String, String> precompiledBinariesPerDevice;
 
     private TornadoLogger logger = new TornadoLogger(this.getClass());
-
-    // MCP Kernel Optimizer (lazy initialized)
-    private static MCPKernelOptimizer mcpOptimizer;
-    private static boolean mcpInitialized = false;
-    private static final Object mcpLock = new Object();
 
     public OCLCodeCache(OCLDeviceContextInterface deviceContext) {
         this.deviceContext = deviceContext;
@@ -578,116 +572,9 @@ public class OCLCodeCache {
         }
     }
 
-    /**
-     * Get or initialize the MCP optimizer (thread-safe, lazy initialization).
-     */
-    private static MCPKernelOptimizer getMCPOptimizer() {
-        if (!mcpInitialized) {
-            synchronized (mcpLock) {
-                if (!mcpInitialized) {
-                    if (TornadoOptions.MCP_OPTIMIZATION_ENABLED && TornadoOptions.MCP_SERVER_PATH != null) {
-                        try {
-                            mcpOptimizer = new MCPKernelOptimizer();
-                            mcpOptimizer.start();
-                            System.out.println("[TornadoVM-MCP] Kernel optimizer initialized");
-                        } catch (Exception e) {
-                            System.err.println("[TornadoVM-MCP] Failed to initialize optimizer: " + e.getMessage());
-                            mcpOptimizer = null;
-                        }
-                    }
-                    mcpInitialized = true;
-                }
-            }
-        }
-        return mcpOptimizer;
-    }
-
-    /**
-     * Attempt to optimize kernel source using MCP server.
-     */
-    private byte[] optimizeKernelWithMCP(byte[] source, String entryPoint) {
-        if (!TornadoOptions.MCP_OPTIMIZATION_ENABLED) {
-            return source;
-        }
-
-        MCPKernelOptimizer optimizer = getMCPOptimizer();
-        if (optimizer == null) {
-            return source;
-        }
-
-        try {
-            String kernelCode = new String(source, java.nio.charset.StandardCharsets.UTF_8);
-            String deviceFamily = detectDeviceFamily();
-
-            // Initial optimization without profiling data (will be enhanced later with actual profiling)
-            String optimizedCode = optimizer.optimizeKernel(
-                kernelCode,
-                "opencl",
-                deviceFamily,
-                0,  // kernel_time_ns - unknown at compile time
-                0,  // copy_in_time_ns
-                0,  // copy_out_time_ns
-                0,  // copy_in_bytes
-                0,  // copy_out_bytes
-                null,  // global_work_size - unknown at compile time
-                null   // local_work_size
-            );
-
-            if (optimizedCode != null && !optimizedCode.equals(kernelCode)) {
-                logger.info("[TornadoVM-MCP] Kernel %s optimized successfully", entryPoint);
-                return optimizedCode.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            }
-        } catch (Exception e) {
-            logger.warn("[TornadoVM-MCP] Optimization failed for %s: %s", entryPoint, e.getMessage());
-        }
-
-        return source;
-    }
-
-    /**
-     * Detect device family based on device context information.
-     */
-    private String detectDeviceFamily() {
-        String deviceName = deviceContext.getDevice().getDeviceName().toLowerCase();
-        String vendor = deviceContext.getPlatformContext().getPlatform().getVendor().toLowerCase();
-
-        if (vendor.contains("nvidia")) {
-            if (deviceName.contains("4090") || deviceName.contains("4080") || deviceName.contains("4070")) {
-                return "nvidia_ada";
-            } else if (deviceName.contains("3090") || deviceName.contains("3080") || deviceName.contains("3070")) {
-                return "nvidia_ampere";
-            } else if (deviceName.contains("a100") || deviceName.contains("a10")) {
-                return "nvidia_ampere_datacenter";
-            } else if (deviceName.contains("h100")) {
-                return "nvidia_hopper";
-            }
-            return "nvidia_generic";
-        } else if (vendor.contains("amd") || vendor.contains("advanced micro")) {
-            return "amd_generic";
-        } else if (vendor.contains("intel")) {
-            return "intel_generic";
-        } else if (vendor.contains("apple")) {
-            if (deviceName.contains("m4")) {
-                return "apple_m4";
-            } else if (deviceName.contains("m3")) {
-                return "apple_m3";
-            } else if (deviceName.contains("m2")) {
-                return "apple_m2";
-            } else if (deviceName.contains("m1")) {
-                return "apple_m1";
-            }
-            return "apple_generic";
-        }
-
-        return "generic";
-    }
-
     public OCLInstalledCode installSource(TaskDataContext meta, String id, String entryPoint, byte[] source) {
 
         logger.info("Installing code for %s into code cache", entryPoint);
-
-        // Apply MCP optimization if enabled
-        source = optimizeKernelWithMCP(source, entryPoint);
 
         boolean isSPIRVBinary = isInputSourceSPIRVBinary(source);
         final OCLProgram program;

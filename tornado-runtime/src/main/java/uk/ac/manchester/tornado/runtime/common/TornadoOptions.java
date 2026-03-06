@@ -83,18 +83,6 @@ public class TornadoOptions {
     public static final boolean PRINT_KERNEL_SOURCE = getBooleanValue("tornado.printKernel", FALSE);
 
     /**
-     * Enable MCP (Model Context Protocol) based kernel optimization using Claude AI.
-     * When enabled, generated kernels are sent to an MCP server for AI-powered optimization.
-     * Requires TORNADOVM_MCP_PATH environment variable to be set.
-     */
-    public static final boolean MCP_OPTIMIZATION_ENABLED = getBooleanValue("tornado.mcp.optimization", FALSE);
-
-    /**
-     * Path to the MCP server. Can be overridden via system property or environment variable.
-     */
-    public static final String MCP_SERVER_PATH = getProperty("tornado.mcp.server.path", System.getenv("TORNADOVM_MCP_PATH"));
-
-    /**
      * Priority of the PTX Backend. The higher the number, the more priority over
      * the rest of the backends.
      */
