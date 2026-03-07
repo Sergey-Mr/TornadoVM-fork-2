@@ -74,4 +74,53 @@ public class PTXCodeCache {
         }
         cache.clear();
     }
+
+    /**
+     * Get the kernel source code for a cached kernel.
+     * This is used for MCP kernel comparison - to extract the generated kernel
+     * after first execution.
+     *
+     * @param name The kernel name/id
+     * @return The kernel source code as a string, or null if not found
+     */
+    public String getKernelSource(String name) {
+        PTXInstalledCode installedCode = cache.get(name);
+        if (installedCode != null) {
+            return installedCode.getGeneratedSourceCode();
+        }
+        return null;
+    }
+
+    /**
+     * Invalidate a cached kernel to force recompilation.
+     * This is used for MCP kernel comparison - to replace the kernel with an optimized version.
+     *
+     * @param name The kernel name/id
+     */
+    public void invalidateKernel(String name) {
+        PTXInstalledCode installedCode = cache.get(name);
+        if (installedCode != null) {
+            installedCode.invalidate();
+            cache.remove(name);
+        }
+    }
+
+    /**
+     * Replace a cached kernel with new source code.
+     * This is used for MCP kernel comparison - run the optimized kernel in the same conditions.
+     *
+     * @param name The kernel name/id
+     * @param resolvedMethodName The method/entry point name
+     * @param newSource New kernel source code
+     * @param debugKernel Whether to print debug info
+     * @return The new installed code, or null if installation failed
+     */
+    public PTXInstalledCode replaceKernelSource(String name, String resolvedMethodName, String newSource, boolean debugKernel) {
+        // First invalidate the existing kernel
+        invalidateKernel(name);
+
+        // Install the new source
+        byte[] sourceBytes = newSource.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        return installSource(name, sourceBytes, resolvedMethodName, debugKernel);
+    }
 }

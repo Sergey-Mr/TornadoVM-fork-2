@@ -674,4 +674,30 @@ public class OCLDeviceContext implements OCLDeviceContextInterface {
         OCLCommandQueue commandQueue = getCommandQueue(executionPlanId);
         return commandQueue.mapOnDeviceMemoryRegion(commandQueue.getCommandQueuePtr(), destDevicePtr, srcDevicePtr, offset, sizeOfType, sizeSource, sizeDest);
     }
+
+    // =========================================================================
+    // MCP Kernel Comparison Support
+    // =========================================================================
+
+    @Override
+    public String getKernelSource(long executionPlanId, String taskId, String entryPoint) {
+        entryPoint = checkKernelName(entryPoint);
+        OCLCodeCache oclCodeCache = getOCLCodeCache(executionPlanId);
+        return oclCodeCache.getKernelSource(taskId, entryPoint);
+    }
+
+    @Override
+    public boolean replaceKernelSource(long executionPlanId, String taskId, String entryPoint, String newKernelSource, Object meta) {
+        entryPoint = checkKernelName(entryPoint);
+        OCLCodeCache oclCodeCache = getOCLCodeCache(executionPlanId);
+
+        // Cast meta to TaskDataContext (can be null)
+        uk.ac.manchester.tornado.runtime.tasks.meta.TaskDataContext taskMeta = null;
+        if (meta instanceof uk.ac.manchester.tornado.runtime.tasks.meta.TaskDataContext) {
+            taskMeta = (uk.ac.manchester.tornado.runtime.tasks.meta.TaskDataContext) meta;
+        }
+
+        OCLInstalledCode installedCode = oclCodeCache.replaceKernelSource(taskMeta, taskId, entryPoint, newKernelSource);
+        return installedCode != null;
+    }
 }

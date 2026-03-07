@@ -229,4 +229,22 @@ public class ImmutableTaskGraph {
     boolean isGridRegistered() {
         return taskGraph.isGridRegistered();
     }
+
+    // =========================================================================
+    // MCP Kernel Comparison Support
+    // =========================================================================
+
+    /**
+     * Get the generated kernel source code for a specific task.
+     */
+    String getGeneratedKernelSource(String taskId, long executionPlanId) {
+        return taskGraph.getGeneratedKernelSource(taskId, executionPlanId);
+    }
+
+    /**
+     * Replace the kernel source for a specific task.
+     */
+    boolean replaceKernelSource(String taskId, String newKernelSource, long executionPlanId) {
+        return taskGraph.replaceKernelSource(taskId, newKernelSource, executionPlanId);
+    }
 }

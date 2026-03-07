@@ -501,4 +501,20 @@ public abstract class SPIRVDeviceContext implements TornadoDeviceContext {
     public long mapOnDeviceMemoryRegion(long executionPlanId, long destBuffer, long srcBuffer, long offset, int sizeOfType, long sizeSource, long sizeDest) {
         return spirvContext.mapOnDeviceMemoryRegion(executionPlanId, getDeviceIndex(), destBuffer, srcBuffer, offset, sizeOfType, sizeSource, sizeDest);
     }
+
+    // =========================================================================
+    // MCP Kernel Comparison Support (stub implementation for SPIRV)
+    // =========================================================================
+
+    @Override
+    public String getKernelSource(long executionPlanId, String taskId, String entryPoint) {
+        // SPIRV kernel source retrieval not yet implemented
+        return null;
+    }
+
+    @Override
+    public boolean replaceKernelSource(long executionPlanId, String taskId, String entryPoint, String newKernelSource, Object meta) {
+        // SPIRV kernel replacement not yet implemented
+        return false;
+    }
 }

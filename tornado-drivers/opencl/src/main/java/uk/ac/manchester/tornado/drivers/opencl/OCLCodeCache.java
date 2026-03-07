@@ -739,6 +739,58 @@ public class OCLCodeCache {
         return cache.get(id + "-" + entryPoint);
     }
 
+    /**
+     * Get the kernel source code for a cached kernel.
+     * This is used for MCP kernel comparison - to extract the generated kernel
+     * after first execution.
+     *
+     * @param id Task graph ID
+     * @param entryPoint Kernel entry point name
+     * @return The kernel source code as a string, or null if not found
+     */
+    public String getKernelSource(String id, String entryPoint) {
+        OCLInstalledCode installedCode = cache.get(id + "-" + entryPoint);
+        if (installedCode != null) {
+            return installedCode.getGeneratedSourceCode();
+        }
+        return null;
+    }
+
+    /**
+     * Invalidate a cached kernel to force recompilation.
+     * This is used for MCP kernel comparison - to replace the kernel with an optimized version.
+     *
+     * @param id Task graph ID
+     * @param entryPoint Kernel entry point name
+     */
+    public void invalidateKernel(String id, String entryPoint) {
+        String key = id + "-" + entryPoint;
+        OCLInstalledCode installedCode = cache.get(key);
+        if (installedCode != null) {
+            installedCode.invalidate();
+            cache.remove(key);
+        }
+    }
+
+    /**
+     * Replace a cached kernel with new source code.
+     * This is used for MCP kernel comparison - run the optimized kernel in the same conditions.
+     *
+     * @param meta Task metadata
+     * @param id Task graph ID
+     * @param entryPoint Kernel entry point name
+     * @param newSource New kernel source code
+     * @return The new installed code, or null if installation failed
+     */
+    public OCLInstalledCode replaceKernelSource(TaskDataContext meta, String id, String entryPoint, String newSource) {
+        // First invalidate the existing kernel
+        invalidateKernel(id, entryPoint);
+
+        // Install the new source
+        byte[] sourceBytes = newSource.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        return installSource(meta, id, entryPoint, sourceBytes);
+    }
+
     private static class Pair {
         private String taskName;
         private String entryPoint;

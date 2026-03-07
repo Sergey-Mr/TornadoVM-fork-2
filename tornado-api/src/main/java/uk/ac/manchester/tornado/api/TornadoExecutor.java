@@ -368,4 +368,30 @@ class TornadoExecutor {
     public void withWarmUpIterations(int iterations, ExecutorFrame executorFrame) {
         IntStream.range(0, iterations).forEach(iteration -> runForWarmUp(executorFrame));
     }
+
+    // =========================================================================
+    // MCP Kernel Comparison Support
+    // =========================================================================
+
+    /**
+     * Get the generated kernel source code for a specific task.
+     */
+    String getGeneratedKernelSource(int taskGraphIndex, String taskId, long executionPlanId) {
+        if (taskGraphIndex >= immutableTaskGraphList.size()) {
+            throw new TornadoRuntimeException("TaskGraph index #" + taskGraphIndex + " does not exist");
+        }
+        ImmutableTaskGraph itg = immutableTaskGraphList.get(taskGraphIndex);
+        return itg.getGeneratedKernelSource(taskId, executionPlanId);
+    }
+
+    /**
+     * Replace the kernel source for a specific task.
+     */
+    boolean replaceKernelSource(int taskGraphIndex, String taskId, String newKernelSource, long executionPlanId) {
+        if (taskGraphIndex >= immutableTaskGraphList.size()) {
+            throw new TornadoRuntimeException("TaskGraph index #" + taskGraphIndex + " does not exist");
+        }
+        ImmutableTaskGraph itg = immutableTaskGraphList.get(taskGraphIndex);
+        return itg.replaceKernelSource(taskId, newKernelSource, executionPlanId);
+    }
 }

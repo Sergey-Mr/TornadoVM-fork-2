@@ -50,6 +50,7 @@ import uk.ac.manchester.tornado.api.plan.types.WithResetDevice;
 import uk.ac.manchester.tornado.api.plan.types.WithThreadInfo;
 import uk.ac.manchester.tornado.api.plan.types.WithWarmUpIterations;
 import uk.ac.manchester.tornado.api.plan.types.WithWarmUpTime;
+import uk.ac.manchester.tornado.api.mcp.MCPKernelOptimizer;
 import uk.ac.manchester.tornado.api.runtime.ExecutorFrame;
 import uk.ac.manchester.tornado.api.runtime.TornadoRuntimeProvider;
 
@@ -97,6 +98,12 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
     protected TornadoExecutionPlan parentLink;
 
     protected List<TornadoExecutionResult> planResults;
+
+    /**
+     * Track whether MCP optimization has been applied for each task.
+     */
+    private boolean mcpOptimizationApplied = false;
+    private int mcpExecutionCount = 0;
 
     /**
      * Create an Execution Plan: Object to create and optimize an execution plan for
@@ -178,12 +185,95 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
      * @return {@link TornadoExecutionPlan}
      */
     public TornadoExecutionResult execute() {
+        // If MCP optimization is enabled, always enable profiler to collect timing data
+        if (MCPKernelOptimizer.isEnabled() && executionFrame.getProfilerMode() == null) {
+            executionFrame.setProfilerMode(ProfilerMode.SILENT);
+        }
+
         tornadoExecutor.execute(executionFrame);
         TornadoProfilerResult profilerResult = new TornadoProfilerResult(tornadoExecutor, this.getTraceExecutionPlan());
         TornadoExecutionResult executionResult = new TornadoExecutionResult(profilerResult);
         planResults.add(executionResult);
         tornadoExecutor.updateLastExecutedTaskGraph();
+
+        // MCP Optimization: After warmup (5 executions), optimize the kernel
+        mcpExecutionCount++;
+        if (MCPKernelOptimizer.isEnabled() && !mcpOptimizationApplied && mcpExecutionCount == 5) {
+            long kernelTimeNs = executionResult.getProfilerResult().getDeviceKernelTime();
+            applyMCPOptimization(kernelTimeNs);
+        }
+
         return executionResult;
+    }
+
+    /**
+     * Apply MCP optimization to the kernel and benchmark the improvement.
+     * Called after warmup when we have valid profiling data.
+     */
+    private void applyMCPOptimization(long originalKernelTimeNs) {
+        MCPKernelOptimizer optimizer = new MCPKernelOptimizer();
+        String backend = System.getProperty("tornado.mcp.backend", "opencl");
+        String taskId = "t0";
+
+        String kernelSource = getGeneratedKernelSource(taskId);
+        if (kernelSource == null || kernelSource.isEmpty()) {
+            System.err.println("[MCP] Could not extract kernel source");
+            return;
+        }
+
+        double originalTimeMs = originalKernelTimeNs / 1_000_000.0;
+        System.out.printf("[MCP] Original kernel time: %.3f ms (%d ns)%n", originalTimeMs, originalKernelTimeNs);
+
+        String optimizedKernel = optimizer.optimize(kernelSource, backend, originalKernelTimeNs);
+
+        if (optimizedKernel == null || optimizedKernel.isEmpty()) {
+            System.err.println("[MCP] Optimization failed - no kernel returned");
+            return;
+        }
+
+        boolean replaced = replaceKernelSource(taskId, optimizedKernel);
+        if (!replaced) {
+            System.err.println("[MCP] Kernel replacement failed!");
+            return;
+        }
+
+        // Warmup optimized kernel (3 runs)
+        System.out.println("[MCP] Warming up optimized kernel...");
+        for (int i = 0; i < 3; i++) {
+            tornadoExecutor.execute(executionFrame);
+        }
+
+        // Benchmark optimized kernel (5 runs, take average)
+        System.out.println("[MCP] Benchmarking optimized kernel...");
+        long totalTime = 0;
+        for (int i = 0; i < 5; i++) {
+            tornadoExecutor.execute(executionFrame);
+            TornadoProfilerResult pr = new TornadoProfilerResult(tornadoExecutor, this.getTraceExecutionPlan());
+            totalTime += pr.getDeviceKernelTime();
+        }
+        long optimizedKernelTimeNs = totalTime / 5;
+        double optimizedTimeMs = optimizedKernelTimeNs / 1_000_000.0;
+
+        // Print comparison
+        double speedup = (double) originalKernelTimeNs / optimizedKernelTimeNs;
+        double improvement = ((originalKernelTimeNs - optimizedKernelTimeNs) / (double) originalKernelTimeNs) * 100;
+
+        System.out.println();
+        System.out.println("╔════════════════════════════════════════════════════════════╗");
+        System.out.println("║              MCP KERNEL OPTIMIZATION RESULTS               ║");
+        System.out.println("╠════════════════════════════════════════════════════════════╣");
+        System.out.printf("║  Original TornadoVM kernel:  %8.3f ms                   ║%n", originalTimeMs);
+        System.out.printf("║  MCP-Optimized kernel:       %8.3f ms                   ║%n", optimizedTimeMs);
+        System.out.println("╠════════════════════════════════════════════════════════════╣");
+        if (speedup >= 1.0) {
+            System.out.printf("║  Speedup: %.2fx FASTER (%.1f%% improvement)                ║%n", speedup, improvement);
+        } else {
+            System.out.printf("║  Speedup: %.2fx (%.1f%% slower)                            ║%n", speedup, -improvement);
+        }
+        System.out.println("╚════════════════════════════════════════════════════════════╝");
+        System.out.println();
+
+        mcpOptimizationApplied = true;
     }
 
     /**
@@ -631,5 +721,77 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         }
         tornadoExecutor.withWarmUpIterations(iterations, executionFrame);
         return new WithWarmUpIterations(this, iterations);
+    }
+
+    // =========================================================================
+    // MCP Kernel Comparison API
+    // =========================================================================
+
+    /**
+     * Get the generated kernel source code for a specific task after execution.
+     * This method is used for MCP kernel comparison - to extract the kernel
+     * that TornadoVM generated so it can be sent to the MCP server for optimization.
+     *
+     * <p>
+     * This method should be called AFTER at least one execution of the plan,
+     * otherwise the kernel may not have been generated yet.
+     * </p>
+     *
+     * @param taskGraphIndex Index of the task graph (0 for first/only graph)
+     * @param taskId The task ID within the graph (e.g., "t0")
+     * @return The kernel source code as a string, or null if not found
+     *
+     * @since 1.1.3
+     */
+    public String getGeneratedKernelSource(int taskGraphIndex, String taskId) {
+        return tornadoExecutor.getGeneratedKernelSource(taskGraphIndex, taskId, executionFrame.getExecutionPlanId());
+    }
+
+    /**
+     * Get the generated kernel source code for a task in the first task graph.
+     * Convenience method for single-graph execution plans.
+     *
+     * @param taskId The task ID within the graph (e.g., "t0")
+     * @return The kernel source code as a string, or null if not found
+     *
+     * @since 1.1.3
+     */
+    public String getGeneratedKernelSource(String taskId) {
+        return getGeneratedKernelSource(0, taskId);
+    }
+
+    /**
+     * Replace the kernel for a specific task with new source code.
+     * This method is used for MCP kernel comparison - to run an optimized kernel
+     * under the exact same conditions as the original.
+     *
+     * <p>
+     * After calling this method, the next execution will use the new kernel.
+     * The data buffers and work dimensions remain the same, ensuring a fair comparison.
+     * </p>
+     *
+     * @param taskGraphIndex Index of the task graph (0 for first/only graph)
+     * @param taskId The task ID within the graph (e.g., "t0")
+     * @param newKernelSource The optimized kernel source code
+     * @return true if replacement was successful, false otherwise
+     *
+     * @since 1.1.3
+     */
+    public boolean replaceKernelSource(int taskGraphIndex, String taskId, String newKernelSource) {
+        return tornadoExecutor.replaceKernelSource(taskGraphIndex, taskId, newKernelSource, executionFrame.getExecutionPlanId());
+    }
+
+    /**
+     * Replace the kernel for a task in the first task graph.
+     * Convenience method for single-graph execution plans.
+     *
+     * @param taskId The task ID within the graph (e.g., "t0")
+     * @param newKernelSource The optimized kernel source code
+     * @return true if replacement was successful, false otherwise
+     *
+     * @since 1.1.3
+     */
+    public boolean replaceKernelSource(String taskId, String newKernelSource) {
+        return replaceKernelSource(0, taskId, newKernelSource);
     }
 }
