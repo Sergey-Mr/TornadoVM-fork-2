@@ -110,6 +110,8 @@ public interface TornadoTaskGraphInterface extends ProfilerInterface {
 
     Collection<?> getOutputs();
 
+    Collection<?> getInputs();
+
     TornadoTaskGraphInterface createImmutableTaskGraph();
 
     void enableProfiler(ProfilerMode profilerMode);

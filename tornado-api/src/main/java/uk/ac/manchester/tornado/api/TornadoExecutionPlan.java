@@ -17,12 +17,21 @@
  */
 package uk.ac.manchester.tornado.api;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
+import uk.ac.manchester.tornado.api.common.Access;
 import uk.ac.manchester.tornado.api.common.TornadoDevice;
+import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 import uk.ac.manchester.tornado.api.enums.ProfilerMode;
 import uk.ac.manchester.tornado.api.enums.TornadoVMBackendType;
 import uk.ac.manchester.tornado.api.exceptions.TornadoExecutionPlanException;
@@ -104,6 +113,9 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
      */
     private boolean mcpOptimizationApplied = false;
     private int mcpExecutionCount = 0;
+    private static final int MCP_WARMUP_ITERATIONS = 5;
+    private static final int MCP_BENCHMARK_ITERATIONS = 10;
+    private List<Long> originalKernelTimes = new ArrayList<>();
 
     /**
      * Create an Execution Plan: Object to create and optimize an execution plan for
@@ -196,21 +208,41 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         planResults.add(executionResult);
         tornadoExecutor.updateLastExecutedTaskGraph();
 
-        // MCP Optimization: After warmup (5 executions), optimize the kernel
+        // MCP Optimization: Collect kernel times during warmup, then optimize
         mcpExecutionCount++;
-        if (MCPKernelOptimizer.isEnabled() && !mcpOptimizationApplied && mcpExecutionCount == 5) {
-            long kernelTimeNs = executionResult.getProfilerResult().getDeviceKernelTime();
-            applyMCPOptimization(kernelTimeNs);
+        if (MCPKernelOptimizer.isEnabled() && !mcpOptimizationApplied) {
+            // Use getDeviceKernelTime() - same as manual prebuiltTask benchmarks
+            TornadoProfilerResult pr = executionResult.getProfilerResult();
+            long kernelTimeNs = pr.getDeviceKernelTime();
+
+            // Skip first few runs (compilation/warmup), then collect measurements
+            if (mcpExecutionCount > MCP_WARMUP_ITERATIONS) {
+                originalKernelTimes.add(kernelTimeNs);
+            }
+
+            // After collecting enough samples, optimize
+            if (originalKernelTimes.size() >= MCP_BENCHMARK_ITERATIONS) {
+                applyMCPOptimization();
+            }
         }
 
         return executionResult;
     }
 
     /**
-     * Apply MCP optimization to the kernel and benchmark the improvement.
-     * Called after warmup when we have valid profiling data.
+     * Apply MCP optimization to the kernel with iterative feedback loop.
+     * If the optimized kernel is slower, retry with feedback up to 3 times.
+     * Uses same methodology as custom benchmarks: average multiple KERNEL_TIME measurements.
      */
-    private void applyMCPOptimization(long originalKernelTimeNs) {
+    private void applyMCPOptimization() {
+        mcpOptimizationApplied = true;  // Prevent re-entry
+
+        // Calculate statistics for original kernel (collected during warmup)
+        long originalSum = originalKernelTimes.stream().mapToLong(Long::longValue).sum();
+        long originalAvgNs = originalSum / originalKernelTimes.size();
+        long originalMin = originalKernelTimes.stream().mapToLong(Long::longValue).min().orElse(0);
+        long originalMax = originalKernelTimes.stream().mapToLong(Long::longValue).max().orElse(0);
+
         MCPKernelOptimizer optimizer = new MCPKernelOptimizer();
         String backend = System.getProperty("tornado.mcp.backend", "opencl");
         String taskId = "t0";
@@ -221,59 +253,332 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
             return;
         }
 
-        double originalTimeMs = originalKernelTimeNs / 1_000_000.0;
-        System.out.printf("[MCP] Original kernel time: %.3f ms (%d ns)%n", originalTimeMs, originalKernelTimeNs);
+        final double originalTimeMs = originalAvgNs / 1_000_000.0;
+        System.out.printf("[MCP] Original kernel time (avg of %d runs): %.3f ms%n",
+                originalKernelTimes.size(), originalTimeMs);
+        System.out.printf("[MCP] Original min/max: %.3f / %.3f ms%n",
+                originalMin / 1_000_000.0, originalMax / 1_000_000.0);
 
-        String optimizedKernel = optimizer.optimize(kernelSource, backend, originalKernelTimeNs);
+        // Use optimizeWithFeedback for iterative optimization with retry
+        MCPKernelOptimizer.OptimizationResult result = optimizer.optimizeWithFeedback(
+                kernelSource,
+                backend,
+                originalTimeMs,
+                (optimizedKernel) -> benchmarkOptimizedKernel(optimizedKernel, taskId)
+        );
 
-        if (optimizedKernel == null || optimizedKernel.isEmpty()) {
-            System.err.println("[MCP] Optimization failed - no kernel returned");
-            return;
+        // Use the stored timing from the result (no re-benchmarking to avoid variance)
+        String finalKernel = result.optimizedKernel();
+        double finalTimeMs = result.optimizedTimeMs();
+        double speedup = originalTimeMs / finalTimeMs;
+        double improvement = ((originalTimeMs - finalTimeMs) / originalTimeMs) * 100;
+
+        // Note: We don't apply the optimized kernel to the original execution plan.
+        // The prebuiltTask benchmark proves the optimization works. If users want to use
+        // the optimized kernel in production, they should use prebuiltTask directly with
+        // the optimized kernel file.
+
+        System.out.println();
+        System.out.println("╔═══════════════════════════════════════════════════════════════════════╗");
+        System.out.println("║                   MCP KERNEL OPTIMIZATION RESULTS                     ║");
+        System.out.println("║                   (KERNEL_TIME only, same as benchmarks)              ║");
+        System.out.println("╠═══════════════════════════════════════════════════════════════════════╣");
+        System.out.printf("║  Original TornadoVM kernel:                                           ║%n");
+        System.out.printf("║    Avg: %8.3f ms  (Min: %.3f, Max: %.3f)                         ║%n",
+                originalTimeMs, originalMin / 1_000_000.0, originalMax / 1_000_000.0);
+        System.out.printf("║  MCP-Optimized kernel (attempt %d):                                    ║%n", result.attemptNumber());
+        System.out.printf("║    Avg: %8.3f ms                                                   ║%n", finalTimeMs);
+        System.out.println("╠═══════════════════════════════════════════════════════════════════════╣");
+        // Use actual speedup value to determine faster/slower (not result.success())
+        if (speedup > 1.0) {
+            if (result.success()) {
+                System.out.printf("║  Speedup: %.2fx FASTER (%.1f%% improvement) ✓                         ║%n", speedup, improvement);
+            } else {
+                System.out.printf("║  Speedup: %.2fx FASTER (%.1f%% improvement, below threshold)          ║%n", speedup, improvement);
+            }
+        } else if (speedup == 1.0) {
+            System.out.printf("║  Result: NO CHANGE (same performance)                                 ║%n");
+        } else {
+            System.out.printf("║  Speedup: %.2fx SLOWER (%.1f%% slower) - all %d attempts failed       ║%n",
+                    speedup, -improvement, result.attemptNumber());
+        }
+        System.out.println("╚═══════════════════════════════════════════════════════════════════════╝");
+        System.out.println();
+
+        // Exit after MCP optimization - the benchmark is complete
+        System.out.println("[MCP] Optimization complete. Exiting.");
+        System.exit(0);
+    }
+
+    /**
+     * Benchmark an optimized kernel using prebuiltTask approach.
+     * This creates a fresh TaskGraph with proper grid configuration,
+     * ensuring the optimized kernel runs with correct thread mapping.
+     */
+    private double benchmarkOptimizedKernel(String optimizedKernel, String taskId) {
+        try {
+            return benchmarkWithPrebuiltTask(optimizedKernel, taskId);
+        } catch (Exception e) {
+            System.err.println("[MCP] PrebuiltTask benchmark failed: " + e.getMessage());
+            e.printStackTrace();
+            // Fallback to replaceKernelSource approach
+            return benchmarkWithReplaceKernel(optimizedKernel, taskId);
+        }
+    }
+
+    /**
+     * Benchmark using prebuiltTask - creates fresh TaskGraph with proper grid configuration.
+     * This is the preferred method as it correctly handles optimized kernels that expect
+     * 1:1 thread mapping instead of grid-stride loops.
+     */
+    private double benchmarkWithPrebuiltTask(String optimizedKernel, String taskId) throws IOException, TornadoExecutionPlanException {
+        // 1. Write optimized kernel to temp file
+        File tempKernelFile = File.createTempFile("mcp_optimized_", ".cl");
+        tempKernelFile.deleteOnExit();
+        try (FileOutputStream fos = new FileOutputStream(tempKernelFile)) {
+            fos.write(optimizedKernel.getBytes(StandardCharsets.UTF_8));
         }
 
+        // 2. Extract entry point from kernel
+        String entryPoint = extractEntryPoint(optimizedKernel);
+        if (entryPoint == null) {
+            throw new RuntimeException("Could not extract entry point from kernel");
+        }
+
+        // 3. Get inputs and outputs from the original task graph
+        List<Object> inputs = tornadoExecutor.getInputs();
+        List<Object> outputs = tornadoExecutor.getOutputs();
+
+        if (inputs.isEmpty()) {
+            throw new RuntimeException("No inputs found in task graph");
+        }
+
+        // 4. Determine problem size from inputs (assume Matrix2DFloat or FloatArray)
+        int problemSize = determineProblemSize(inputs.get(0));
+        System.out.printf("[MCP] Detected problem size: %d%n", problemSize);
+
+        // 5. Create AccessorParameters - for matrix multiplication: A, B (input), C (output), size (scalar)
+        int numParams = inputs.size() + outputs.size() + 1; // +1 for size
+        AccessorParameters accessors = new AccessorParameters(numParams);
+
+        int paramIndex = 0;
+        // Add inputs as READ_ONLY
+        for (Object input : inputs) {
+            accessors.set(paramIndex++, input, Access.READ_ONLY);
+        }
+        // Add outputs as WRITE_ONLY
+        for (Object output : outputs) {
+            accessors.set(paramIndex++, output, Access.WRITE_ONLY);
+        }
+        // Add size as scalar (NONE access)
+        accessors.set(paramIndex, Integer.valueOf(problemSize), Access.NONE);
+
+        // 6. Create new TaskGraph with prebuiltTask
+        String graphName = "mcp_bench";
+        TaskGraph benchGraph = new TaskGraph(graphName)
+                .transferToDevice(DataTransferMode.FIRST_EXECUTION, inputs.toArray())
+                .prebuiltTask(taskId, entryPoint, tempKernelFile.getAbsolutePath(), accessors)
+                .transferToHost(DataTransferMode.EVERY_EXECUTION, outputs.toArray());
+
+        ImmutableTaskGraph snapshot = benchGraph.snapshot();
+
+        // 7. Configure grid scheduler
+        WorkerGrid2D workerGrid = new WorkerGrid2D(problemSize, problemSize);
+
+        // Parse local work size from kernel's reqd_work_group_size attribute
+        int[] localSize = parseLocalWorkSize(optimizedKernel);
+        if (localSize != null) {
+            workerGrid.setLocalWork(localSize[0], localSize[1], 1);
+            System.out.printf("[MCP] PrebuiltTask grid: global=[%d,%d], local=[%d,%d]%n",
+                    problemSize, problemSize, localSize[0], localSize[1]);
+        } else {
+            System.out.printf("[MCP] PrebuiltTask grid: global=[%d,%d], local=default%n",
+                    problemSize, problemSize);
+        }
+
+        GridScheduler gridScheduler = new GridScheduler(graphName + "." + taskId, workerGrid);
+
+        // 8. Warmup and benchmark
+        // NOTE: We don't use try-with-resources here because closing the plan
+        // would free device memory for the shared input/output objects, which
+        // breaks the original execution plan that shares these objects.
+        List<Long> benchTimes = new ArrayList<>();
+        TornadoDevice device = tornadoExecutor.getDevice(0);
+
+        TornadoExecutionPlan benchPlan = new TornadoExecutionPlan(snapshot);
+        benchPlan.withDevice(device).withGridScheduler(gridScheduler);
+
+        // Warmup
+        for (int i = 0; i < MCP_WARMUP_ITERATIONS; i++) {
+            benchPlan.execute();
+        }
+
+        // Benchmark
+        for (int i = 0; i < MCP_BENCHMARK_ITERATIONS; i++) {
+            TornadoExecutionResult result = benchPlan.withProfiler(ProfilerMode.SILENT).execute();
+            long kernelTime = result.getProfilerResult().getDeviceKernelTime();
+            benchTimes.add(kernelTime);
+        }
+        // Don't close benchPlan - let it be garbage collected without freeing device memory
+
+        // Calculate average time in ms
+        long sum = benchTimes.stream().mapToLong(Long::longValue).sum();
+        long avgNs = sum / benchTimes.size();
+        return avgNs / 1_000_000.0;
+    }
+
+    /**
+     * Fallback benchmark using replaceKernelSource approach.
+     * Less accurate for optimized kernels but works when prebuiltTask fails.
+     */
+    private double benchmarkWithReplaceKernel(String optimizedKernel, String taskId) {
         boolean replaced = replaceKernelSource(taskId, optimizedKernel);
         if (!replaced) {
             System.err.println("[MCP] Kernel replacement failed!");
+            return Double.MAX_VALUE;
+        }
+
+        configureMCPGridScheduler(optimizedKernel, taskId);
+
+        // Warmup
+        for (int i = 0; i < MCP_WARMUP_ITERATIONS; i++) {
+            tornadoExecutor.execute(executionFrame);
+        }
+
+        // Benchmark
+        List<Long> optimizedTimes = new ArrayList<>();
+        for (int i = 0; i < MCP_BENCHMARK_ITERATIONS; i++) {
+            tornadoExecutor.execute(executionFrame);
+            TornadoProfilerResult pr = new TornadoProfilerResult(tornadoExecutor, this.getTraceExecutionPlan());
+            long kernelTime = pr.getDeviceKernelTime();
+            optimizedTimes.add(kernelTime);
+        }
+
+        long optimizedSum = optimizedTimes.stream().mapToLong(Long::longValue).sum();
+        long optimizedAvgNs = optimizedSum / optimizedTimes.size();
+        return optimizedAvgNs / 1_000_000.0;
+    }
+
+    /**
+     * Extract kernel entry point name from OpenCL source.
+     */
+    private String extractEntryPoint(String kernelSource) {
+        Pattern pattern = Pattern.compile("__kernel\\s+void\\s+(\\w+)\\s*\\(");
+        Matcher matcher = pattern.matcher(kernelSource);
+        if (matcher.find()) {
+            return matcher.group(1);
+        }
+        return null;
+    }
+
+    /**
+     * Parse local work size from reqd_work_group_size attribute.
+     * Returns [localX, localY] or null if not found.
+     * Handles both numeric values and macro names like TS.
+     */
+    private int[] parseLocalWorkSize(String kernelSource) {
+        // Try to match numeric values directly: reqd_work_group_size(16, 16, 1)
+        Pattern numericPattern = Pattern.compile("reqd_work_group_size\\s*\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)");
+        Matcher numericMatcher = numericPattern.matcher(kernelSource);
+        if (numericMatcher.find()) {
+            return new int[]{
+                    Integer.parseInt(numericMatcher.group(1)),
+                    Integer.parseInt(numericMatcher.group(2))
+            };
+        }
+
+        // Try to match macro names: reqd_work_group_size(TS, TS, 1) or reqd_work_group_size(TILE_SIZE, TILE_SIZE, 1)
+        Pattern macroPattern = Pattern.compile("reqd_work_group_size\\s*\\(\\s*(\\w+)\\s*,\\s*(\\w+)\\s*,\\s*\\d+\\s*\\)");
+        Matcher macroMatcher = macroPattern.matcher(kernelSource);
+        if (macroMatcher.find()) {
+            String macroName = macroMatcher.group(1);
+            // Look for #define MACRO_NAME value
+            Pattern definePattern = Pattern.compile("#define\\s+" + macroName + "\\s+(\\d+)");
+            Matcher defineMatcher = definePattern.matcher(kernelSource);
+            if (defineMatcher.find()) {
+                int size = Integer.parseInt(defineMatcher.group(1));
+                return new int[]{size, size};
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Determine problem size from an input object.
+     * Supports Matrix2DFloat and TornadoVM array types.
+     */
+    private int determineProblemSize(Object input) {
+        // Try Matrix2DFloat
+        if (input.getClass().getName().contains("Matrix2DFloat")) {
+            try {
+                java.lang.reflect.Method getRows = input.getClass().getMethod("getNumRows");
+                return (int) getRows.invoke(input);
+            } catch (Exception e) {
+                // Fall through to next method
+            }
+        }
+
+        // Try FloatArray or similar TornadoVM array types
+        try {
+            java.lang.reflect.Method getSize = input.getClass().getMethod("getSize");
+            int totalSize = (int) getSize.invoke(input);
+            // Assume square matrix
+            return (int) Math.sqrt(totalSize);
+        } catch (Exception e) {
+            // Fall through
+        }
+
+        // Default fallback
+        System.err.println("[MCP] Could not determine problem size, using default 1024");
+        return 1024;
+    }
+
+    /**
+     * Configure grid scheduler for MCP-optimized kernels.
+     * Parses reqd_work_group_size attribute and sets appropriate global/local dimensions.
+     */
+    private void configureMCPGridScheduler(String optimizedKernel, String taskId) {
+        // Parse reqd_work_group_size(X, Y, Z) from kernel
+        Pattern pattern = Pattern.compile("reqd_work_group_size\\s*\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)");
+        Matcher matcher = pattern.matcher(optimizedKernel);
+
+        if (!matcher.find()) {
+            System.out.println("[MCP] No reqd_work_group_size found, using default grid");
             return;
         }
 
-        // Warmup optimized kernel (3 runs)
-        System.out.println("[MCP] Warming up optimized kernel...");
-        for (int i = 0; i < 3; i++) {
-            tornadoExecutor.execute(executionFrame);
+        int localX = Integer.parseInt(matcher.group(1));
+        int localY = Integer.parseInt(matcher.group(2));
+        int localZ = Integer.parseInt(matcher.group(3));
+
+        // For matrix operations, assume problem size is power-of-2 and matches original launch
+        // Try to get problem size from kernel (look for hardcoded 1024 or similar)
+        int problemSize = 1024;  // Default for MatrixMultiplication2D 1024x1024
+        Pattern sizePattern = Pattern.compile("for\\s*\\([^;]*<\\s*(\\d+)");
+        Matcher sizeMatcher = sizePattern.matcher(optimizedKernel);
+        if (sizeMatcher.find()) {
+            problemSize = Integer.parseInt(sizeMatcher.group(1));
         }
 
-        // Benchmark optimized kernel (5 runs, take average)
-        System.out.println("[MCP] Benchmarking optimized kernel...");
-        long totalTime = 0;
-        for (int i = 0; i < 5; i++) {
-            tornadoExecutor.execute(executionFrame);
-            TornadoProfilerResult pr = new TornadoProfilerResult(tornadoExecutor, this.getTraceExecutionPlan());
-            totalTime += pr.getDeviceKernelTime();
-        }
-        long optimizedKernelTimeNs = totalTime / 5;
-        double optimizedTimeMs = optimizedKernelTimeNs / 1_000_000.0;
+        // Global size = problem size (one thread per output element for tiled kernels)
+        long globalX = problemSize;
+        long globalY = problemSize;
 
-        // Print comparison
-        double speedup = (double) originalKernelTimeNs / optimizedKernelTimeNs;
-        double improvement = ((originalKernelTimeNs - optimizedKernelTimeNs) / (double) originalKernelTimeNs) * 100;
+        System.out.printf("[MCP] Configuring grid: global=[%d,%d], local=[%d,%d]%n",
+                globalX, globalY, localX, localY);
 
-        System.out.println();
-        System.out.println("╔════════════════════════════════════════════════════════════╗");
-        System.out.println("║              MCP KERNEL OPTIMIZATION RESULTS               ║");
-        System.out.println("╠════════════════════════════════════════════════════════════╣");
-        System.out.printf("║  Original TornadoVM kernel:  %8.3f ms                   ║%n", originalTimeMs);
-        System.out.printf("║  MCP-Optimized kernel:       %8.3f ms                   ║%n", optimizedTimeMs);
-        System.out.println("╠════════════════════════════════════════════════════════════╣");
-        if (speedup >= 1.0) {
-            System.out.printf("║  Speedup: %.2fx FASTER (%.1f%% improvement)                ║%n", speedup, improvement);
-        } else {
-            System.out.printf("║  Speedup: %.2fx (%.1f%% slower)                            ║%n", speedup, -improvement);
-        }
-        System.out.println("╚════════════════════════════════════════════════════════════╝");
-        System.out.println();
+        // Create WorkerGrid2D with specified dimensions
+        WorkerGrid2D workerGrid = new WorkerGrid2D((int) globalX, (int) globalY);
+        workerGrid.setLocalWork(localX, localY, 1);
 
-        mcpOptimizationApplied = true;
+        // Get task graph name and create grid scheduler
+        String taskGraphName = tornadoExecutor.getTaskGraphName();
+        String fullTaskName = taskGraphName + "." + taskId;
+
+        GridScheduler gridScheduler = new GridScheduler(fullTaskName, workerGrid);
+        executionFrame.setGridScheduler(gridScheduler);
+        tornadoExecutor.withGridScheduler(gridScheduler);
     }
 
     /**

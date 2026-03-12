@@ -3,6 +3,9 @@
  *
  * This is called automatically by TornadoVM after the first kernel execution
  * to optimize the kernel using the MCP server.
+ *
+ * Supports iterative feedback loop: if optimized kernel is slower,
+ * retry with feedback up to MAX_ATTEMPTS times.
  */
 package uk.ac.manchester.tornado.api.mcp;
 
@@ -11,25 +14,57 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Scanner;
+import java.util.function.Function;
 
 public class MCPKernelOptimizer {
 
     private static final String DEFAULT_MCP_URL = "http://localhost:8090/optimize";
+    private static final String TEST_MCP_URL = "http://localhost:8090/optimize-test";
     private static final int CONNECT_TIMEOUT = 10000;  // 10 seconds
     private static final int READ_TIMEOUT = 180000;    // 3 minutes for LLM
+    private static final int MAX_ATTEMPTS = 3;         // Maximum optimization attempts
 
     private final String mcpServerUrl;
     private final String deviceFamily;
+    private final boolean testMode;
+
+    /**
+     * Record for tracking a previous optimization attempt that was slower.
+     */
+    public record PreviousAttempt(
+            String optimizedKernel,
+            double originalTimeMs,
+            double optimizedTimeMs,
+            int attemptNumber
+    ) {}
+
+    /**
+     * Result of an optimization attempt.
+     */
+    public record OptimizationResult(
+            String optimizedKernel,
+            int attemptNumber,
+            boolean success,
+            double optimizedTimeMs  // Store the benchmarked time to avoid re-benchmarking
+    ) {}
 
     public MCPKernelOptimizer() {
-        this.mcpServerUrl = System.getProperty("tornado.mcp.server.url", DEFAULT_MCP_URL);
+        this.testMode = Boolean.getBoolean("tornado.mcp.test");
+        String defaultUrl = testMode ? TEST_MCP_URL : DEFAULT_MCP_URL;
+        this.mcpServerUrl = System.getProperty("tornado.mcp.server.url", defaultUrl);
         this.deviceFamily = detectDeviceFamily();
+        if (testMode) {
+            System.out.println("[MCP] TEST MODE: Using single-call endpoint with known-good example");
+        }
     }
 
     public MCPKernelOptimizer(String serverUrl, String deviceFamily) {
         this.mcpServerUrl = serverUrl;
         this.deviceFamily = deviceFamily;
+        this.testMode = false;
     }
 
     /**
@@ -40,7 +75,7 @@ public class MCPKernelOptimizer {
     }
 
     /**
-     * Optimize a kernel by calling the MCP HTTP server.
+     * Optimize a kernel by calling the MCP HTTP server (single attempt, no retry).
      *
      * @param kernelSource  The original kernel source code
      * @param backend       "opencl" or "ptx"
@@ -56,7 +91,7 @@ public class MCPKernelOptimizer {
             System.out.println("[MCP] Sending kernel to " + mcpServerUrl + " for optimization...");
             System.out.println("[MCP] Backend: " + backend + ", Device: " + deviceFamily + ", Kernel time: " + kernelTimeNs + "ns");
 
-            String optimized = callMCPServer(kernelSource, backend, deviceFamily, kernelTimeNs);
+            String optimized = callMCPServer(kernelSource, backend, deviceFamily, kernelTimeNs, null);
 
             if (optimized != null && !optimized.isEmpty()) {
                 System.out.println("[MCP] Optimization successful! Received " + optimized.length() + " chars");
@@ -72,10 +107,124 @@ public class MCPKernelOptimizer {
     }
 
     /**
+     * Optimize a kernel with iterative feedback loop.
+     *
+     * If the optimized kernel is slower than the original, retry with feedback
+     * up to MAX_ATTEMPTS times.
+     *
+     * @param kernelSource     The original kernel source code
+     * @param backend          "opencl" or "ptx"
+     * @param originalTimeMs   Original kernel execution time in milliseconds
+     * @param benchmarkFunc    Function to benchmark a kernel and return execution time in ms
+     * @return OptimizationResult with the best kernel found
+     */
+    public OptimizationResult optimizeWithFeedback(
+            String kernelSource,
+            String backend,
+            double originalTimeMs,
+            Function<String, Double> benchmarkFunc) {
+
+        if (kernelSource == null || kernelSource.isEmpty()) {
+            return new OptimizationResult(kernelSource, 0, false, originalTimeMs);
+        }
+
+        // Minimum improvement threshold (2%) to count as success
+        // This prevents false positives from measurement noise
+        final double MIN_SPEEDUP_THRESHOLD = 0.98;  // optimizedTime must be <= 98% of original
+
+        // In test mode, only 1 attempt (testing benchmarking with known-good kernel)
+        final int maxAttempts = testMode ? 1 : MAX_ATTEMPTS;
+
+        List<PreviousAttempt> previousAttempts = new ArrayList<>();
+        String bestKernel = kernelSource;
+        double bestTimeMs = originalTimeMs;
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                System.out.println("[MCP] Optimization attempt " + attempt + "/" + MAX_ATTEMPTS);
+                System.out.println("[MCP] Sending kernel to " + mcpServerUrl + " for optimization...");
+                System.out.println("[MCP] Backend: " + backend + ", Device: " + deviceFamily);
+
+                if (!previousAttempts.isEmpty()) {
+                    System.out.println("[MCP] Including " + previousAttempts.size() + " previous failed attempt(s) as feedback");
+                }
+
+                // Call MCP server with previous attempts if any
+                String optimized = callMCPServer(
+                        kernelSource,
+                        backend,
+                        deviceFamily,
+                        (long) (originalTimeMs * 1_000_000),
+                        previousAttempts.isEmpty() ? null : previousAttempts
+                );
+
+                if (optimized == null || optimized.isEmpty()) {
+                    System.out.println("[MCP] Attempt " + attempt + " returned empty result");
+                    continue;
+                }
+
+                System.out.println("[MCP] Received optimized kernel (" + optimized.length() + " chars)");
+
+                // Benchmark the optimized kernel
+                System.out.println("[MCP] Benchmarking optimized kernel...");
+                double optimizedTimeMs = benchmarkFunc.apply(optimized);
+
+                double speedup = originalTimeMs / optimizedTimeMs;
+                // Must be at least 2% faster to count as success (handles measurement noise)
+                boolean isFaster = optimizedTimeMs <= (originalTimeMs * MIN_SPEEDUP_THRESHOLD);
+
+                // Track best result seen
+                if (optimizedTimeMs < bestTimeMs) {
+                    bestKernel = optimized;
+                    bestTimeMs = optimizedTimeMs;
+                }
+
+                if (isFaster) {
+                    double improvement = ((originalTimeMs - optimizedTimeMs) / originalTimeMs) * 100;
+                    System.out.printf("[MCP] ✓ Attempt %d SUCCESS: %.3f ms → %.3f ms (%.2fx speedup, %.1f%% faster)%n",
+                            attempt, originalTimeMs, optimizedTimeMs, speedup, improvement);
+                    return new OptimizationResult(optimized, attempt, true, optimizedTimeMs);
+                } else {
+                    double diff = ((optimizedTimeMs - originalTimeMs) / originalTimeMs) * 100;
+                    if (diff >= 0) {
+                        System.out.printf("[MCP] ✗ Attempt %d NOT FASTER: %.3f ms → %.3f ms (%.1f%% slower)%n",
+                                attempt, originalTimeMs, optimizedTimeMs, diff);
+                    } else {
+                        System.out.printf("[MCP] ✗ Attempt %d MARGINAL: %.3f ms → %.3f ms (%.1f%% faster, below 2%% threshold)%n",
+                                attempt, originalTimeMs, optimizedTimeMs, -diff);
+                    }
+
+                    // Track this failed attempt for feedback
+                    previousAttempts.add(new PreviousAttempt(
+                            optimized,
+                            originalTimeMs,
+                            optimizedTimeMs,
+                            attempt
+                    ));
+
+                    if (attempt < maxAttempts) {
+                        System.out.println("[MCP] Retrying with feedback about what didn't work...");
+                    }
+                }
+
+            } catch (IOException e) {
+                System.err.println("[MCP] Attempt " + attempt + " failed: " + e.getMessage());
+            }
+        }
+
+        System.out.println("[MCP] All " + maxAttempts + " attempts completed without significant improvement");
+        return new OptimizationResult(bestKernel, maxAttempts, false, bestTimeMs);
+    }
+
+    /**
      * Make HTTP POST request to MCP server.
      */
-    private String callMCPServer(String kernelCode, String backend, String device, long kernelTimeNs)
-            throws IOException {
+    private String callMCPServer(
+            String kernelCode,
+            String backend,
+            String device,
+            long kernelTimeNs,
+            List<PreviousAttempt> previousAttempts) throws IOException {
 
         URL url = new URL(mcpServerUrl);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
@@ -86,13 +235,33 @@ public class MCPKernelOptimizer {
         conn.setReadTimeout(READ_TIMEOUT);
 
         // Build JSON request
-        String jsonRequest = String.format(
-                "{\"kernel_code\": %s, \"backend\": \"%s\", \"device_family\": \"%s\", \"kernel_time_ns\": %d}",
-                escapeJson(kernelCode), backend, device, kernelTimeNs
-        );
+        StringBuilder json = new StringBuilder();
+        json.append("{");
+        json.append("\"kernel_code\": ").append(escapeJson(kernelCode)).append(", ");
+        json.append("\"backend\": \"").append(backend).append("\", ");
+        json.append("\"device_family\": \"").append(device).append("\", ");
+        json.append("\"kernel_time_ns\": ").append(kernelTimeNs);
+
+        // Add previous attempts if any
+        if (previousAttempts != null && !previousAttempts.isEmpty()) {
+            json.append(", \"previous_attempts\": [");
+            for (int i = 0; i < previousAttempts.size(); i++) {
+                PreviousAttempt attempt = previousAttempts.get(i);
+                if (i > 0) json.append(", ");
+                json.append("{");
+                json.append("\"optimized_kernel\": ").append(escapeJson(attempt.optimizedKernel())).append(", ");
+                json.append("\"original_time_ms\": ").append(attempt.originalTimeMs()).append(", ");
+                json.append("\"optimized_time_ms\": ").append(attempt.optimizedTimeMs()).append(", ");
+                json.append("\"attempt_number\": ").append(attempt.attemptNumber());
+                json.append("}");
+            }
+            json.append("]");
+        }
+
+        json.append("}");
 
         try (OutputStream os = conn.getOutputStream()) {
-            os.write(jsonRequest.getBytes(StandardCharsets.UTF_8));
+            os.write(json.toString().getBytes(StandardCharsets.UTF_8));
         }
 
         int responseCode = conn.getResponseCode();

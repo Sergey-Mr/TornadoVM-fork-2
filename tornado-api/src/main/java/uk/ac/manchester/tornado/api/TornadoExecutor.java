@@ -214,6 +214,12 @@ class TornadoExecutor {
         return outputs;
     }
 
+    List<Object> getInputs() {
+        List<Object> inputs = new ArrayList<>();
+        immutableTaskGraphList.forEach(immutableTaskGraph -> inputs.addAll(immutableTaskGraph.getInputs()));
+        return inputs;
+    }
+
     void withoutThreadInfo() {
         immutableTaskGraphList.forEach(ImmutableTaskGraph::withoutThreadInfo);
     }
@@ -393,5 +399,16 @@ class TornadoExecutor {
         }
         ImmutableTaskGraph itg = immutableTaskGraphList.get(taskGraphIndex);
         return itg.replaceKernelSource(taskId, newKernelSource, executionPlanId);
+    }
+
+    /**
+     * Get the name of the first task graph.
+     * Used by MCP to configure grid scheduler.
+     */
+    String getTaskGraphName() {
+        if (immutableTaskGraphList.isEmpty()) {
+            return "s0";  // Default name
+        }
+        return immutableTaskGraphList.get(0).getTaskGraph().getTaskGraphName();
     }
 }

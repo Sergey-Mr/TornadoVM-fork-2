@@ -174,6 +174,10 @@ public class ImmutableTaskGraph {
         return taskGraph.getOutputs();
     }
 
+    Collection<?> getInputs() {
+        return taskGraph.getInputs();
+    }
+
     void withConcurrentDevices() {
         taskGraph.withConcurrentDevices();
     }

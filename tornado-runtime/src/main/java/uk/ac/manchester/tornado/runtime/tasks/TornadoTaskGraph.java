@@ -343,7 +343,24 @@ public class TornadoTaskGraph implements TornadoTaskGraphInterface {
 
     @Override
     public Collection<?> getOutputs() {
-        return streamOutObjects;
+        // Return objects from outputModeObjects (which includes all transfer modes)
+        // not just streamOutObjects (which only includes EVERY_EXECUTION mode)
+        List<Object> outputs = new ArrayList<>();
+        for (StreamingObject outputObject : outputModeObjects) {
+            outputs.add(outputObject.getObject());
+        }
+        return outputs;
+    }
+
+    @Override
+    public Collection<?> getInputs() {
+        // Return objects from inputModesObjects (which includes all transfer modes)
+        // not just streamInObjects (which only includes EVERY_EXECUTION mode)
+        List<Object> inputs = new ArrayList<>();
+        for (StreamingObject inputObject : inputModesObjects) {
+            inputs.add(inputObject.getObject());
+        }
+        return inputs;
     }
 
     @Override

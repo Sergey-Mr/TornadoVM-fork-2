@@ -959,6 +959,10 @@ public class TaskGraph implements TaskGraphInterface {
         return taskGraphImpl.getOutputs();
     }
 
+    public Collection<?> getInputs() {
+        return taskGraphImpl.getInputs();
+    }
+
     TornadoTaskGraphInterface getTaskGraphImpl() {
         return taskGraphImpl;
     }
