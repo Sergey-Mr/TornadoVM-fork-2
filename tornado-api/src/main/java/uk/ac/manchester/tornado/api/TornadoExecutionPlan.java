@@ -25,6 +25,13 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -264,7 +271,7 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
                 kernelSource,
                 backend,
                 originalTimeMs,
-                (optimizedKernel) -> benchmarkOptimizedKernel(optimizedKernel, taskId)
+                (optimizedKernel, gridConfig) -> benchmarkOptimizedKernel(optimizedKernel, taskId, gridConfig)
         );
 
         // Use the stored timing from the result (no re-benchmarking to avoid variance)
@@ -310,19 +317,70 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         System.exit(0);
     }
 
+    // Timeout for benchmarking to prevent infinite loops in generated kernels
+    private static final int MCP_BENCHMARK_TIMEOUT_SECONDS = 60;
+
     /**
      * Benchmark an optimized kernel using prebuiltTask approach.
      * This creates a fresh TaskGraph with proper grid configuration,
      * ensuring the optimized kernel runs with correct thread mapping.
+     *
+     * Includes timeout protection to prevent hanging on infinite loops.
      */
-    private double benchmarkOptimizedKernel(String optimizedKernel, String taskId) {
+    private double benchmarkOptimizedKernel(String optimizedKernel, String taskId, MCPKernelOptimizer.GridConfig gridConfig) {
+        // Validate array offsets before benchmarking
+        validateArrayOffsets(optimizedKernel);
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        Future<Double> future = executor.submit(() -> benchmarkWithPrebuiltTask(optimizedKernel, taskId, gridConfig));
+
         try {
-            return benchmarkWithPrebuiltTask(optimizedKernel, taskId);
-        } catch (Exception e) {
-            System.err.println("[MCP] PrebuiltTask benchmark failed: " + e.getMessage());
-            e.printStackTrace();
+            // Wait with timeout to prevent infinite loops
+            double result = future.get(MCP_BENCHMARK_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            return result;
+        } catch (TimeoutException e) {
+            System.err.println("[MCP] ⚠ Benchmark TIMEOUT after " + MCP_BENCHMARK_TIMEOUT_SECONDS +
+                    "s - kernel may have infinite loop or be extremely slow");
+            future.cancel(true);
+            return Double.MAX_VALUE;  // Treat as failed optimization
+        } catch (ExecutionException e) {
+            System.err.println("[MCP] PrebuiltTask benchmark failed: " + e.getCause().getMessage());
+            e.getCause().printStackTrace();
             // Fallback to replaceKernelSource approach
             return benchmarkWithReplaceKernel(optimizedKernel, taskId);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.err.println("[MCP] Benchmark interrupted");
+            return Double.MAX_VALUE;
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /**
+     * Validate that array offsets in the kernel use TornadoVM's +4 pattern.
+     * Warns if unusual offsets are detected that might cause incorrect results.
+     */
+    private void validateArrayOffsets(String kernelSource) {
+        // Look for pointer casting patterns: ((__global float *)A) + N
+        Pattern pattern = Pattern.compile("\\(\\s*\\(\\s*__global\\s+\\w+\\s*\\*\\s*\\)\\s*\\w+\\s*\\)\\s*\\+\\s*(\\d+)");
+        Matcher matcher = pattern.matcher(kernelSource);
+
+        while (matcher.find()) {
+            int offset = Integer.parseInt(matcher.group(1));
+            if (offset != 4) {
+                System.err.println("[MCP] ⚠ WARNING: Unusual array offset detected: +" + offset +
+                        " (TornadoVM expects +4 for float arrays)");
+                System.err.println("[MCP]   This may cause incorrect results. Matched: " + matcher.group());
+            }
+        }
+
+        // Also check for missing offsets (direct cast without offset)
+        Pattern directCastPattern = Pattern.compile("\\(\\s*\\(\\s*__global\\s+\\w+\\s*\\*\\s*\\)\\s*\\w+\\s*\\)\\s*\\[");
+        Matcher directMatcher = directCastPattern.matcher(kernelSource);
+        if (directMatcher.find()) {
+            System.err.println("[MCP] ⚠ WARNING: Direct array access without offset detected");
+            System.err.println("[MCP]   TornadoVM arrays require +4 offset for float data. Matched: " + directMatcher.group());
         }
     }
 
@@ -331,7 +389,7 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
      * This is the preferred method as it correctly handles optimized kernels that expect
      * 1:1 thread mapping instead of grid-stride loops.
      */
-    private double benchmarkWithPrebuiltTask(String optimizedKernel, String taskId) throws IOException, TornadoExecutionPlanException {
+    private double benchmarkWithPrebuiltTask(String optimizedKernel, String taskId, MCPKernelOptimizer.GridConfig gridConfig) throws IOException, TornadoExecutionPlanException {
         // 1. Write optimized kernel to temp file
         File tempKernelFile = File.createTempFile("mcp_optimized_", ".cl");
         tempKernelFile.deleteOnExit();
@@ -353,9 +411,9 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
             throw new RuntimeException("No inputs found in task graph");
         }
 
-        // 4. Determine problem size from inputs (assume Matrix2DFloat or FloatArray)
-        int problemSize = determineProblemSize(inputs.get(0));
-        System.out.printf("[MCP] Detected problem size: %d%n", problemSize);
+        // 4. Determine problem size based on gridConfig dimensions
+        int[] globalSizes = resolveGlobalWorkSize(gridConfig, inputs);
+        System.out.printf("[MCP] Resolved global work size: %s%n", java.util.Arrays.toString(globalSizes));
 
         // 5. Create AccessorParameters - for matrix multiplication: A, B (input), C (output), size (scalar)
         int numParams = inputs.size() + outputs.size() + 1; // +1 for size
@@ -370,8 +428,8 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         for (Object output : outputs) {
             accessors.set(paramIndex++, output, Access.WRITE_ONLY);
         }
-        // Add size as scalar (NONE access)
-        accessors.set(paramIndex, Integer.valueOf(problemSize), Access.NONE);
+        // Add size as scalar (NONE access) - use first global size dimension
+        accessors.set(paramIndex, Integer.valueOf(globalSizes[0]), Access.NONE);
 
         // 6. Create new TaskGraph with prebuiltTask
         String graphName = "mcp_bench";
@@ -382,20 +440,8 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
 
         ImmutableTaskGraph snapshot = benchGraph.snapshot();
 
-        // 7. Configure grid scheduler
-        WorkerGrid2D workerGrid = new WorkerGrid2D(problemSize, problemSize);
-
-        // Parse local work size from kernel's reqd_work_group_size attribute
-        int[] localSize = parseLocalWorkSize(optimizedKernel);
-        if (localSize != null) {
-            workerGrid.setLocalWork(localSize[0], localSize[1], 1);
-            System.out.printf("[MCP] PrebuiltTask grid: global=[%d,%d], local=[%d,%d]%n",
-                    problemSize, problemSize, localSize[0], localSize[1]);
-        } else {
-            System.out.printf("[MCP] PrebuiltTask grid: global=[%d,%d], local=default%n",
-                    problemSize, problemSize);
-        }
-
+        // 7. Configure grid scheduler based on gridConfig from LLM
+        WorkerGrid workerGrid = createWorkerGrid(gridConfig, globalSizes, optimizedKernel);
         GridScheduler gridScheduler = new GridScheduler(graphName + "." + taskId, workerGrid);
 
         // 8. Warmup and benchmark
@@ -460,14 +506,33 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
     }
 
     /**
-     * Extract kernel entry point name from OpenCL source.
+     * Extract kernel entry point name from OpenCL or PTX source.
+     * OpenCL: __kernel void functionName(...)
+     * PTX: .visible .entry functionName(...)
      */
     private String extractEntryPoint(String kernelSource) {
-        Pattern pattern = Pattern.compile("__kernel\\s+void\\s+(\\w+)\\s*\\(");
-        Matcher matcher = pattern.matcher(kernelSource);
-        if (matcher.find()) {
-            return matcher.group(1);
+        // Try OpenCL pattern first: __kernel void functionName(
+        Pattern openclPattern = Pattern.compile("__kernel\\s+void\\s+(\\w+)\\s*\\(");
+        Matcher openclMatcher = openclPattern.matcher(kernelSource);
+        if (openclMatcher.find()) {
+            return openclMatcher.group(1);
         }
+
+        // Try PTX pattern: .visible .entry functionName(
+        Pattern ptxPattern = Pattern.compile("\\.visible\\s+\\.entry\\s+(\\w+)\\s*\\(");
+        Matcher ptxMatcher = ptxPattern.matcher(kernelSource);
+        if (ptxMatcher.find()) {
+            return ptxMatcher.group(1);
+        }
+
+        // Try alternative PTX pattern without .visible: .entry functionName(
+        Pattern ptxAltPattern = Pattern.compile("\\.entry\\s+(\\w+)\\s*\\(");
+        Matcher ptxAltMatcher = ptxAltPattern.matcher(kernelSource);
+        if (ptxAltMatcher.find()) {
+            return ptxAltMatcher.group(1);
+        }
+
+        System.err.println("[MCP] Could not extract entry point from kernel");
         return null;
     }
 
@@ -532,6 +597,222 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         // Default fallback
         System.err.println("[MCP] Could not determine problem size, using default 1024");
         return 1024;
+    }
+
+    /**
+     * Get the raw array size from an input object (without sqrt for 1D kernels).
+     */
+    private int getArraySize(Object input) {
+        // Try FloatArray or similar TornadoVM array types
+        try {
+            java.lang.reflect.Method getSize = input.getClass().getMethod("getSize");
+            return (int) getSize.invoke(input);
+        } catch (Exception e) {
+            // Fall through
+        }
+
+        // Try Matrix2DFloat - return total elements
+        if (input.getClass().getName().contains("Matrix2DFloat")) {
+            try {
+                java.lang.reflect.Method getRows = input.getClass().getMethod("getNumRows");
+                java.lang.reflect.Method getCols = input.getClass().getMethod("getNumColumns");
+                int rows = (int) getRows.invoke(input);
+                int cols = (int) getCols.invoke(input);
+                return rows * cols;
+            } catch (Exception e) {
+                // Fall through
+            }
+        }
+
+        return 1024;  // Default fallback
+    }
+
+    /**
+     * Resolve global work size from gridConfig and inputs.
+     * Supports 1D, 2D, and 3D grids, including non-square configurations.
+     *
+     * For expressions like "D * 32", evaluates using detected dimensions.
+     */
+    private int[] resolveGlobalWorkSize(MCPKernelOptimizer.GridConfig gridConfig, List<Object> inputs) {
+        if (gridConfig == null) {
+            // Fallback to 2D square matrix assumption
+            int size = determineProblemSize(inputs.get(0));
+            return new int[] { size, size };
+        }
+
+        int dims = gridConfig.dimensions();
+        String[] globalParams = gridConfig.globalWorkSize();
+
+        // Get base sizes from inputs
+        int arraySize = getArraySize(inputs.get(0));  // Total elements
+        int matrixDim = determineProblemSize(inputs.get(0));  // sqrt for matrices
+
+        // Resolve each dimension
+        int[] globalSizes = new int[dims];
+        for (int i = 0; i < dims; i++) {
+            String param = (i < globalParams.length) ? globalParams[i] : globalParams[0];
+            globalSizes[i] = resolveGlobalSizeExpression(param, arraySize, matrixDim, inputs);
+        }
+
+        System.out.printf("[MCP] %dD kernel: resolved global work size %s%n",
+                dims, java.util.Arrays.toString(globalSizes));
+        return globalSizes;
+    }
+
+    /**
+     * Resolve a global size expression to a concrete value.
+     * Handles parameter names and simple expressions like "D * 32".
+     */
+    private int resolveGlobalSizeExpression(String expr, int arraySize, int matrixDim, List<Object> inputs) {
+        expr = expr.trim();
+
+        // Handle expressions with multiplication (e.g., "D * 32", "outputDim * 32")
+        if (expr.contains("*")) {
+            String[] parts = expr.split("\\*");
+            int result = 1;
+            for (String part : parts) {
+                part = part.trim();
+                if (part.matches("\\d+")) {
+                    result *= Integer.parseInt(part);
+                } else {
+                    // Resolve the variable part
+                    result *= resolveParameterName(part, arraySize, matrixDim, inputs);
+                }
+            }
+            return result;
+        }
+
+        // Handle pure numbers
+        if (expr.matches("\\d+")) {
+            return Integer.parseInt(expr);
+        }
+
+        // Handle parameter names
+        return resolveParameterName(expr, arraySize, matrixDim, inputs);
+    }
+
+    /**
+     * Resolve a parameter name to its value.
+     */
+    private int resolveParameterName(String paramName, int arraySize, int matrixDim, List<Object> inputs) {
+        paramName = paramName.toLowerCase();
+
+        // Common parameter name patterns
+        if (paramName.contains("numbodies") || paramName.contains("num_bodies") ||
+            paramName.equals("n") || paramName.equals("length") || paramName.contains("arraylength")) {
+            return arraySize;
+        }
+        if (paramName.equals("size") || paramName.contains("dim") || paramName.equals("d") ||
+            paramName.contains("rows") || paramName.contains("cols") ||
+            paramName.contains("width") || paramName.contains("height")) {
+            return matrixDim;
+        }
+        if (paramName.contains("output")) {
+            // For reductions, output size might be different
+            return matrixDim;
+        }
+
+        // Try to get dimensions from Matrix2DFloat if available
+        if ((paramName.contains("row") || paramName.contains("height")) && !inputs.isEmpty()) {
+            Object input = inputs.get(0);
+            if (input.getClass().getName().contains("Matrix2DFloat")) {
+                try {
+                    java.lang.reflect.Method getRows = input.getClass().getMethod("getNumRows");
+                    return (int) getRows.invoke(input);
+                } catch (Exception e) { /* fall through */ }
+            }
+        }
+        if ((paramName.contains("col") || paramName.contains("width")) && !inputs.isEmpty()) {
+            Object input = inputs.get(0);
+            if (input.getClass().getName().contains("Matrix2DFloat")) {
+                try {
+                    java.lang.reflect.Method getCols = input.getClass().getMethod("getNumColumns");
+                    return (int) getCols.invoke(input);
+                } catch (Exception e) { /* fall through */ }
+            }
+        }
+
+        // Default: use matrix dimension
+        return matrixDim;
+    }
+
+    /**
+     * Create appropriate WorkerGrid based on gridConfig dimensions.
+     * Supports 1D, 2D, and 3D grids with flexible local work sizes.
+     */
+    private WorkerGrid createWorkerGrid(MCPKernelOptimizer.GridConfig gridConfig, int[] globalSizes, String optimizedKernel) {
+        int[] localSize = null;
+
+        // Use local work size from gridConfig if available
+        if (gridConfig != null && gridConfig.localWorkSize() != null && gridConfig.localWorkSize().length > 0) {
+            localSize = gridConfig.localWorkSize();
+            System.out.printf("[MCP] Using local work size from LLM: %s%n", java.util.Arrays.toString(localSize));
+        } else {
+            // Fallback to parsing from kernel
+            localSize = parseLocalWorkSize(optimizedKernel);
+            if (localSize != null) {
+                System.out.printf("[MCP] Parsed local work size from kernel: %s%n", java.util.Arrays.toString(localSize));
+            }
+        }
+
+        // Determine dimensions
+        int dims = (gridConfig != null) ? gridConfig.dimensions() : 2;
+
+        // Log pattern if available
+        if (gridConfig != null && gridConfig.pattern() != null) {
+            System.out.printf("[MCP] Grid pattern: %s%n", gridConfig.pattern());
+        }
+
+        if (dims == 1) {
+            // 1D grid
+            WorkerGrid1D workerGrid = new WorkerGrid1D(globalSizes[0]);
+            if (localSize != null && localSize.length >= 1) {
+                workerGrid.setLocalWork(localSize[0], 1, 1);
+                System.out.printf("[MCP] PrebuiltTask 1D grid: global=[%d], local=[%d]%n",
+                        globalSizes[0], localSize[0]);
+            } else {
+                System.out.printf("[MCP] PrebuiltTask 1D grid: global=[%d], local=default%n", globalSizes[0]);
+            }
+            return workerGrid;
+        } else if (dims == 2) {
+            // 2D grid (supports non-square)
+            int globalX = globalSizes[0];
+            int globalY = globalSizes.length > 1 ? globalSizes[1] : globalSizes[0];
+            WorkerGrid2D workerGrid = new WorkerGrid2D(globalX, globalY);
+
+            if (localSize != null && localSize.length >= 2) {
+                workerGrid.setLocalWork(localSize[0], localSize[1], 1);
+                System.out.printf("[MCP] PrebuiltTask 2D grid: global=[%d,%d], local=[%d,%d]%n",
+                        globalX, globalY, localSize[0], localSize[1]);
+            } else if (localSize != null && localSize.length == 1) {
+                workerGrid.setLocalWork(localSize[0], localSize[0], 1);
+                System.out.printf("[MCP] PrebuiltTask 2D grid: global=[%d,%d], local=[%d,%d]%n",
+                        globalX, globalY, localSize[0], localSize[0]);
+            } else {
+                System.out.printf("[MCP] PrebuiltTask 2D grid: global=[%d,%d], local=default%n", globalX, globalY);
+            }
+            return workerGrid;
+        } else {
+            // 3D grid
+            int globalX = globalSizes[0];
+            int globalY = globalSizes.length > 1 ? globalSizes[1] : globalSizes[0];
+            int globalZ = globalSizes.length > 2 ? globalSizes[2] : 1;
+            WorkerGrid3D workerGrid = new WorkerGrid3D(globalX, globalY, globalZ);
+
+            if (localSize != null && localSize.length >= 3) {
+                workerGrid.setLocalWork(localSize[0], localSize[1], localSize[2]);
+                System.out.printf("[MCP] PrebuiltTask 3D grid: global=[%d,%d,%d], local=[%d,%d,%d]%n",
+                        globalX, globalY, globalZ, localSize[0], localSize[1], localSize[2]);
+            } else if (localSize != null && localSize.length >= 2) {
+                workerGrid.setLocalWork(localSize[0], localSize[1], 1);
+                System.out.printf("[MCP] PrebuiltTask 3D grid: global=[%d,%d,%d], local=[%d,%d,1]%n",
+                        globalX, globalY, globalZ, localSize[0], localSize[1]);
+            } else {
+                System.out.printf("[MCP] PrebuiltTask 3D grid: global=[%d,%d,%d], local=default%n",
+                        globalX, globalY, globalZ);
+            }
+            return workerGrid;
+        }
     }
 
     /**

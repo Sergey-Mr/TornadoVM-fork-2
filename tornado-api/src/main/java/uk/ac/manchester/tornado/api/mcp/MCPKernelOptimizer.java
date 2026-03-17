@@ -42,13 +42,30 @@ public class MCPKernelOptimizer {
     ) {}
 
     /**
+     * Grid configuration for launching the optimized kernel.
+     * Supports 1D, 2D, and 3D grids with optional pattern hints.
+     */
+    public record GridConfig(
+            int dimensions,           // 1, 2, or 3
+            String[] globalWorkSize,  // Parameter names or expressions like ["size", "size"] or ["numBodies"] or ["D * 32"]
+            int[] localWorkSize,      // Concrete values like [16, 16] or [256] or [8, 8, 4]
+            String pattern            // Optional: "default", "reduction", "stencil", "tiled" (nullable)
+    ) {
+        // Constructor without pattern for backwards compatibility
+        public GridConfig(int dimensions, String[] globalWorkSize, int[] localWorkSize) {
+            this(dimensions, globalWorkSize, localWorkSize, null);
+        }
+    }
+
+    /**
      * Result of an optimization attempt.
      */
     public record OptimizationResult(
             String optimizedKernel,
             int attemptNumber,
             boolean success,
-            double optimizedTimeMs  // Store the benchmarked time to avoid re-benchmarking
+            double optimizedTimeMs,  // Store the benchmarked time to avoid re-benchmarking
+            GridConfig gridConfig    // Grid configuration from LLM (nullable)
     ) {}
 
     public MCPKernelOptimizer() {
@@ -91,11 +108,11 @@ public class MCPKernelOptimizer {
             System.out.println("[MCP] Sending kernel to " + mcpServerUrl + " for optimization...");
             System.out.println("[MCP] Backend: " + backend + ", Device: " + deviceFamily + ", Kernel time: " + kernelTimeNs + "ns");
 
-            String optimized = callMCPServer(kernelSource, backend, deviceFamily, kernelTimeNs, null);
+            MCPResponse response = callMCPServer(kernelSource, backend, deviceFamily, kernelTimeNs, null);
 
-            if (optimized != null && !optimized.isEmpty()) {
-                System.out.println("[MCP] Optimization successful! Received " + optimized.length() + " chars");
-                return optimized;
+            if (response != null && response.kernel() != null && !response.kernel().isEmpty()) {
+                System.out.println("[MCP] Optimization successful! Received " + response.kernel().length() + " chars");
+                return response.kernel();
             } else {
                 System.out.println("[MCP] Optimization returned empty result");
                 return null;
@@ -115,17 +132,17 @@ public class MCPKernelOptimizer {
      * @param kernelSource     The original kernel source code
      * @param backend          "opencl" or "ptx"
      * @param originalTimeMs   Original kernel execution time in milliseconds
-     * @param benchmarkFunc    Function to benchmark a kernel and return execution time in ms
+     * @param benchmarkFunc    Function to benchmark a kernel with grid config and return execution time in ms
      * @return OptimizationResult with the best kernel found
      */
     public OptimizationResult optimizeWithFeedback(
             String kernelSource,
             String backend,
             double originalTimeMs,
-            Function<String, Double> benchmarkFunc) {
+            java.util.function.BiFunction<String, GridConfig, Double> benchmarkFunc) {
 
         if (kernelSource == null || kernelSource.isEmpty()) {
-            return new OptimizationResult(kernelSource, 0, false, originalTimeMs);
+            return new OptimizationResult(kernelSource, 0, false, originalTimeMs, null);
         }
 
         // Minimum improvement threshold (2%) to count as success
@@ -138,6 +155,7 @@ public class MCPKernelOptimizer {
         List<PreviousAttempt> previousAttempts = new ArrayList<>();
         String bestKernel = kernelSource;
         double bestTimeMs = originalTimeMs;
+        GridConfig bestGridConfig = null;
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
@@ -150,7 +168,7 @@ public class MCPKernelOptimizer {
                 }
 
                 // Call MCP server with previous attempts if any
-                String optimized = callMCPServer(
+                MCPResponse mcpResponse = callMCPServer(
                         kernelSource,
                         backend,
                         deviceFamily,
@@ -158,16 +176,25 @@ public class MCPKernelOptimizer {
                         previousAttempts.isEmpty() ? null : previousAttempts
                 );
 
-                if (optimized == null || optimized.isEmpty()) {
+                if (mcpResponse == null || mcpResponse.kernel() == null || mcpResponse.kernel().isEmpty()) {
                     System.out.println("[MCP] Attempt " + attempt + " returned empty result");
                     continue;
                 }
 
+                String optimized = mcpResponse.kernel();
+                GridConfig gridConfig = mcpResponse.gridConfig();
+
                 System.out.println("[MCP] Received optimized kernel (" + optimized.length() + " chars)");
+                if (gridConfig != null) {
+                    System.out.printf("[MCP] Grid config: %dD, global=%s, local=%s%n",
+                            gridConfig.dimensions(),
+                            java.util.Arrays.toString(gridConfig.globalWorkSize()),
+                            java.util.Arrays.toString(gridConfig.localWorkSize()));
+                }
 
                 // Benchmark the optimized kernel
                 System.out.println("[MCP] Benchmarking optimized kernel...");
-                double optimizedTimeMs = benchmarkFunc.apply(optimized);
+                double optimizedTimeMs = benchmarkFunc.apply(optimized, gridConfig);
 
                 double speedup = originalTimeMs / optimizedTimeMs;
                 // Must be at least 2% faster to count as success (handles measurement noise)
@@ -177,13 +204,14 @@ public class MCPKernelOptimizer {
                 if (optimizedTimeMs < bestTimeMs) {
                     bestKernel = optimized;
                     bestTimeMs = optimizedTimeMs;
+                    bestGridConfig = gridConfig;
                 }
 
                 if (isFaster) {
                     double improvement = ((originalTimeMs - optimizedTimeMs) / originalTimeMs) * 100;
                     System.out.printf("[MCP] ✓ Attempt %d SUCCESS: %.3f ms → %.3f ms (%.2fx speedup, %.1f%% faster)%n",
                             attempt, originalTimeMs, optimizedTimeMs, speedup, improvement);
-                    return new OptimizationResult(optimized, attempt, true, optimizedTimeMs);
+                    return new OptimizationResult(optimized, attempt, true, optimizedTimeMs, gridConfig);
                 } else {
                     double diff = ((optimizedTimeMs - originalTimeMs) / originalTimeMs) * 100;
                     if (diff >= 0) {
@@ -213,13 +241,13 @@ public class MCPKernelOptimizer {
         }
 
         System.out.println("[MCP] All " + maxAttempts + " attempts completed without significant improvement");
-        return new OptimizationResult(bestKernel, maxAttempts, false, bestTimeMs);
+        return new OptimizationResult(bestKernel, maxAttempts, false, bestTimeMs, bestGridConfig);
     }
 
     /**
      * Make HTTP POST request to MCP server.
      */
-    private String callMCPServer(
+    private MCPResponse callMCPServer(
             String kernelCode,
             String backend,
             String device,
@@ -281,21 +309,35 @@ public class MCPKernelOptimizer {
             response = scanner.useDelimiter("\\A").hasNext() ? scanner.next() : "";
         }
 
-        // Extract optimized_kernel from JSON response
-        return extractOptimizedKernel(response);
+        // Extract optimized_kernel and grid_config from JSON response
+        return extractMCPResponse(response);
     }
 
     /**
-     * Extract the optimized_kernel field from JSON response.
+     * Internal result from MCP server containing kernel and grid config.
      */
-    private String extractOptimizedKernel(String json) {
-        int start = json.indexOf("\"optimized_kernel\":");
+    private record MCPResponse(String kernel, GridConfig gridConfig) {}
+
+    /**
+     * Extract optimized_kernel and grid_config from JSON response.
+     */
+    private MCPResponse extractMCPResponse(String json) {
+        String kernel = extractJsonString(json, "optimized_kernel");
+        GridConfig gridConfig = extractGridConfig(json);
+        return new MCPResponse(kernel, gridConfig);
+    }
+
+    /**
+     * Extract a string field from JSON.
+     */
+    private String extractJsonString(String json, String fieldName) {
+        int start = json.indexOf("\"" + fieldName + "\":");
         if (start == -1) {
             return null;
         }
 
         // Find the opening quote of the value
-        start = json.indexOf("\"", start + 19) + 1;
+        start = json.indexOf("\"", start + fieldName.length() + 3) + 1;
         if (start == 0) {
             return null;
         }
@@ -303,14 +345,118 @@ public class MCPKernelOptimizer {
         // Find the closing quote (handling escapes)
         int end = findEndOfJsonString(json, start);
 
-        String kernel = json.substring(start, end);
+        String value = json.substring(start, end);
 
         // Unescape JSON string
-        return kernel
+        return value
                 .replace("\\n", "\n")
                 .replace("\\t", "\t")
                 .replace("\\\"", "\"")
                 .replace("\\\\", "\\");
+    }
+
+    /**
+     * Extract grid_config from JSON response.
+     */
+    private GridConfig extractGridConfig(String json) {
+        // Find grid_config object
+        int start = json.indexOf("\"grid_config\":");
+        if (start == -1) {
+            return null;
+        }
+
+        // Find the opening brace
+        start = json.indexOf("{", start);
+        if (start == -1) {
+            return null;
+        }
+
+        // Find matching closing brace
+        int braceCount = 1;
+        int end = start + 1;
+        while (end < json.length() && braceCount > 0) {
+            char c = json.charAt(end);
+            if (c == '{') braceCount++;
+            else if (c == '}') braceCount--;
+            end++;
+        }
+
+        String configJson = json.substring(start, end);
+
+        try {
+            // Parse dimensions (1, 2, or 3)
+            int dimensions = extractJsonInt(configJson, "dimensions");
+
+            // Parse global_work_size array (strings - parameter names or expressions)
+            String[] globalWorkSize = extractJsonStringArray(configJson, "global_work_size");
+
+            // Parse local_work_size array (ints)
+            int[] localWorkSize = extractJsonIntArray(configJson, "local_work_size");
+
+            // Parse optional pattern field
+            String pattern = extractJsonStringValue(configJson, "pattern");
+
+            if (dimensions > 0 && globalWorkSize != null && localWorkSize != null) {
+                return new GridConfig(dimensions, globalWorkSize, localWorkSize, pattern);
+            }
+        } catch (Exception e) {
+            System.err.println("[MCP] Failed to parse grid_config: " + e.getMessage());
+        }
+
+        return null;
+    }
+
+    /**
+     * Extract a simple string value from JSON (not an array).
+     */
+    private String extractJsonStringValue(String json, String fieldName) {
+        String pattern = "\"" + fieldName + "\":\\s*\"([^\"]+)\"";
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(pattern).matcher(json);
+        if (m.find()) {
+            return m.group(1);
+        }
+        return null;
+    }
+
+    private int extractJsonInt(String json, String fieldName) {
+        String pattern = "\"" + fieldName + "\":\\s*(\\d+)";
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(pattern).matcher(json);
+        if (m.find()) {
+            return Integer.parseInt(m.group(1));
+        }
+        return -1;
+    }
+
+    private String[] extractJsonStringArray(String json, String fieldName) {
+        String pattern = "\"" + fieldName + "\":\\s*\\[([^\\]]+)\\]";
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(pattern).matcher(json);
+        if (m.find()) {
+            String arrayContent = m.group(1);
+            // Extract quoted strings
+            java.util.List<String> values = new ArrayList<>();
+            java.util.regex.Matcher valueMatcher = java.util.regex.Pattern.compile("\"([^\"]+)\"").matcher(arrayContent);
+            while (valueMatcher.find()) {
+                values.add(valueMatcher.group(1));
+            }
+            return values.toArray(new String[0]);
+        }
+        return null;
+    }
+
+    private int[] extractJsonIntArray(String json, String fieldName) {
+        String pattern = "\"" + fieldName + "\":\\s*\\[([^\\]]+)\\]";
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(pattern).matcher(json);
+        if (m.find()) {
+            String arrayContent = m.group(1);
+            // Extract integers
+            java.util.List<Integer> values = new ArrayList<>();
+            java.util.regex.Matcher valueMatcher = java.util.regex.Pattern.compile("(\\d+)").matcher(arrayContent);
+            while (valueMatcher.find()) {
+                values.add(Integer.parseInt(valueMatcher.group(1)));
+            }
+            return values.stream().mapToInt(Integer::intValue).toArray();
+        }
+        return null;
     }
 
     private int findEndOfJsonString(String json, int start) {
