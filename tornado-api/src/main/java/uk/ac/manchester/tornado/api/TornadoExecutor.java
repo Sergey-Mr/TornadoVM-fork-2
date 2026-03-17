@@ -411,4 +411,21 @@ class TornadoExecutor {
         }
         return immutableTaskGraphList.get(0).getTaskGraph().getTaskGraphName();
     }
+
+    /**
+     * Get the first task ID from the first task graph.
+     * Used by MCP to extract and optimize kernel source.
+     */
+    String getFirstTaskId() {
+        if (immutableTaskGraphList.isEmpty()) {
+            return "t0";  // Default
+        }
+        TaskGraph taskGraph = immutableTaskGraphList.get(0).getTaskGraph();
+        java.util.Set<String> taskNames = taskGraph.getTaskNames();
+        if (taskNames == null || taskNames.isEmpty()) {
+            return "t0";  // Default
+        }
+        // Return the first task name
+        return taskNames.iterator().next();
+    }
 }

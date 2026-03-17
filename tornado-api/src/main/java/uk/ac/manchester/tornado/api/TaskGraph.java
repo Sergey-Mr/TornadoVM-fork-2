@@ -658,6 +658,15 @@ public class TaskGraph implements TaskGraphInterface {
     }
 
     /**
+     * Get all task names in this task graph.
+     *
+     * @return Set of task names
+     */
+    public Set<String> getTaskNames() {
+        return taskNames;
+    }
+
+    /**
      * Tag a set of objects (Java objects) to be transferred to the device. There
      * are three modes:
      *

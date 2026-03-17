@@ -123,6 +123,12 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
     private static final int MCP_WARMUP_ITERATIONS = 5;
     private static final int MCP_BENCHMARK_ITERATIONS = 10;
     private List<Long> originalKernelTimes = new ArrayList<>();
+    private String originalKernelSource = null;  // Store for signature validation
+
+    // Validation support
+    private static final float MCP_VALIDATION_TOLERANCE = 1e-4f;  // Tolerance for float comparison
+    private List<float[]> originalOutputValues = null;  // Store original kernel output for validation
+    private String lastValidationError = null;  // Store validation error message for feedback
 
     /**
      * Create an Execution Plan: Object to create and optimize an execution plan for
@@ -229,6 +235,10 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
 
             // After collecting enough samples, optimize
             if (originalKernelTimes.size() >= MCP_BENCHMARK_ITERATIONS) {
+                // Store original outputs for validation before optimization
+                List<Object> outputs = tornadoExecutor.getOutputs();
+                storeOriginalOutputs(outputs);
+
                 applyMCPOptimization();
             }
         }
@@ -252,13 +262,17 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
 
         MCPKernelOptimizer optimizer = new MCPKernelOptimizer();
         String backend = System.getProperty("tornado.mcp.backend", "opencl");
-        String taskId = "t0";
+        String taskId = tornadoExecutor.getFirstTaskId();
+        System.out.println("[MCP] Detected task ID: " + taskId);
 
         String kernelSource = getGeneratedKernelSource(taskId);
         if (kernelSource == null || kernelSource.isEmpty()) {
             System.err.println("[MCP] Could not extract kernel source");
             return;
         }
+
+        // Store original kernel for signature validation
+        this.originalKernelSource = kernelSource;
 
         final double originalTimeMs = originalAvgNs / 1_000_000.0;
         System.out.printf("[MCP] Original kernel time (avg of %d runs): %.3f ms%n",
@@ -271,7 +285,7 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
                 kernelSource,
                 backend,
                 originalTimeMs,
-                (optimizedKernel, gridConfig) -> benchmarkOptimizedKernel(optimizedKernel, taskId, gridConfig)
+                (optimizedKernel, gridConfig) -> benchmarkOptimizedKernelWithValidation(optimizedKernel, taskId, gridConfig)
         );
 
         // Use the stored timing from the result (no re-benchmarking to avoid variance)
@@ -321,6 +335,18 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
     private static final int MCP_BENCHMARK_TIMEOUT_SECONDS = 60;
 
     /**
+     * Benchmark an optimized kernel and return a BenchmarkResult with timing and validation status.
+     * This is the main entry point for MCP optimization benchmarking.
+     */
+    private MCPKernelOptimizer.BenchmarkResult benchmarkOptimizedKernelWithValidation(
+            String optimizedKernel, String taskId, MCPKernelOptimizer.GridConfig gridConfig) {
+        double timeMs = benchmarkOptimizedKernel(optimizedKernel, taskId, gridConfig);
+        String validationError = lastValidationError;  // Captured during benchmark
+        lastValidationError = null;  // Reset for next attempt
+        return new MCPKernelOptimizer.BenchmarkResult(timeMs, validationError);
+    }
+
+    /**
      * Benchmark an optimized kernel using prebuiltTask approach.
      * This creates a fresh TaskGraph with proper grid configuration,
      * ensuring the optimized kernel runs with correct thread mapping.
@@ -328,6 +354,12 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
      * Includes timeout protection to prevent hanging on infinite loops.
      */
     private double benchmarkOptimizedKernel(String optimizedKernel, String taskId, MCPKernelOptimizer.GridConfig gridConfig) {
+        // Validate kernel signature matches original
+        if (originalKernelSource != null && !validateKernelSignature(originalKernelSource, optimizedKernel)) {
+            System.err.println("[MCP] Rejecting optimized kernel due to signature mismatch");
+            return Double.MAX_VALUE;
+        }
+
         // Validate array offsets before benchmarking
         validateArrayOffsets(optimizedKernel);
 
@@ -385,6 +417,66 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
     }
 
     /**
+     * Validate that the optimized kernel has the same signature as the original.
+     * Returns true if signatures match, false otherwise.
+     */
+    private boolean validateKernelSignature(String originalKernel, String optimizedKernel) {
+        String originalSig = extractKernelSignature(originalKernel);
+        String optimizedSig = extractKernelSignature(optimizedKernel);
+
+        if (originalSig == null || optimizedSig == null) {
+            System.err.println("[MCP] ⚠ WARNING: Could not extract kernel signature for validation");
+            return true;  // Allow to proceed, but warn
+        }
+
+        // Count parameters
+        int originalParamCount = countParameters(originalSig);
+        int optimizedParamCount = countParameters(optimizedSig);
+
+        if (originalParamCount != optimizedParamCount) {
+            System.err.println("[MCP] ERROR: Kernel signature mismatch!");
+            System.err.println("[MCP]   Original has " + originalParamCount + " parameters");
+            System.err.println("[MCP]   Optimized has " + optimizedParamCount + " parameters");
+            System.err.println("[MCP]   Original signature: " + originalSig.substring(0, Math.min(200, originalSig.length())) + "...");
+            System.err.println("[MCP]   Optimized signature: " + optimizedSig.substring(0, Math.min(200, optimizedSig.length())) + "...");
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Extract the kernel function signature (parameters) from kernel source.
+     */
+    private String extractKernelSignature(String kernelSource) {
+        // Match __kernel void funcName(params)
+        Pattern pattern = Pattern.compile("__kernel\\s+void\\s+\\w+\\s*\\(([^)]+)\\)");
+        Matcher matcher = pattern.matcher(kernelSource);
+        if (matcher.find()) {
+            return matcher.group(1).trim();
+        }
+        return null;
+    }
+
+    /**
+     * Count the number of parameters in a kernel signature.
+     */
+    private int countParameters(String signature) {
+        if (signature == null || signature.isEmpty()) {
+            return 0;
+        }
+        // Count commas + 1 (but handle nested parentheses)
+        int count = 1;
+        int parenDepth = 0;
+        for (char c : signature.toCharArray()) {
+            if (c == '(') parenDepth++;
+            else if (c == ')') parenDepth--;
+            else if (c == ',' && parenDepth == 0) count++;
+        }
+        return count;
+    }
+
+    /**
      * Benchmark using prebuiltTask - creates fresh TaskGraph with proper grid configuration.
      * This is the preferred method as it correctly handles optimized kernels that expect
      * 1:1 thread mapping instead of grid-stride loops.
@@ -412,24 +504,76 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         }
 
         // 4. Determine problem size based on gridConfig dimensions
-        int[] globalSizes = resolveGlobalWorkSize(gridConfig, inputs);
+        int[] globalSizes = resolveGlobalWorkSize(gridConfig, inputs, outputs);
         System.out.printf("[MCP] Resolved global work size: %s%n", java.util.Arrays.toString(globalSizes));
 
-        // 5. Create AccessorParameters - for matrix multiplication: A, B (input), C (output), size (scalar)
-        int numParams = inputs.size() + outputs.size() + 1; // +1 for size
+        // 5. Create AccessorParameters based on actual kernel signature
+        // Count user parameters (total params - 4 TornadoVM internal params)
+        String kernelSig = extractKernelSignature(optimizedKernel);
+        int totalKernelParams = countParameters(kernelSig);
+        int userParams = totalKernelParams - 4;  // Subtract 4 TornadoVM params
+
+        int dataParams = inputs.size() + outputs.size();
+
+        // Check if kernel has scalar size parameter(s)
+        boolean hasScalarParams = userParams > dataParams;
+        int scalarCount = hasScalarParams ? (userParams - dataParams) : 0;
+
+        System.out.printf("[MCP] Kernel has %d total params, %d user params, %d data objects, %d scalar params%n",
+                totalKernelParams, userParams, dataParams, scalarCount);
+
+        int numParams = dataParams + scalarCount;
         AccessorParameters accessors = new AccessorParameters(numParams);
 
+        // CRITICAL: Parameters must be added in the EXACT order the kernel expects them.
+        // The kernel signature defines the order (e.g., x, hb, w for matrixVectorParallel).
+        // We cannot just add all inputs then all outputs - they may be interleaved!
+
+        // Extract data parameter names from kernel signature
+        List<String> dataParamNames = extractDataParameterNames(kernelSig, dataParams);
+        System.out.printf("[MCP] Kernel data params in order: %s%n", dataParamNames);
+
+        // Match each kernel parameter to the correct input/output object
         int paramIndex = 0;
-        // Add inputs as READ_ONLY
-        for (Object input : inputs) {
+        List<Object> remainingInputs = new ArrayList<>(inputs);
+        List<Object> remainingOutputs = new ArrayList<>(outputs);
+
+        for (String paramName : dataParamNames) {
+            Object matched = matchParameterToDataObject(paramName, remainingInputs, remainingOutputs);
+            if (matched != null) {
+                // Determine access type based on which list it came from
+                Access accessType = remainingInputs.contains(matched) ? Access.READ_ONLY : Access.WRITE_ONLY;
+                // Remove from the appropriate list
+                if (!remainingInputs.remove(matched)) {
+                    remainingOutputs.remove(matched);
+                }
+                accessors.set(paramIndex++, matched, accessType);
+                System.out.printf("[MCP] Param '%s' -> %s (%s)%n", paramName,
+                        matched.getClass().getSimpleName(), accessType);
+            } else {
+                System.err.printf("[MCP] WARNING: Could not match param '%s' to any data object%n", paramName);
+            }
+        }
+
+        // Add any remaining unmatched objects (fallback)
+        for (Object input : remainingInputs) {
             accessors.set(paramIndex++, input, Access.READ_ONLY);
+            System.out.printf("[MCP] Fallback: added remaining input %s%n", input.getClass().getSimpleName());
         }
-        // Add outputs as WRITE_ONLY
-        for (Object output : outputs) {
+        for (Object output : remainingOutputs) {
             accessors.set(paramIndex++, output, Access.WRITE_ONLY);
+            System.out.printf("[MCP] Fallback: added remaining output %s%n", output.getClass().getSimpleName());
         }
-        // Add size as scalar (NONE access) - use first global size dimension
-        accessors.set(paramIndex, Integer.valueOf(globalSizes[0]), Access.NONE);
+
+        // Add scalar size parameters if kernel expects them
+        // Extract parameter names from kernel signature to map them to correct sizes
+        List<String> scalarParamNames = extractScalarParameterNames(kernelSig, scalarCount);
+        for (int i = 0; i < scalarCount; i++) {
+            String paramName = i < scalarParamNames.size() ? scalarParamNames.get(i) : "";
+            int sizeValue = resolveScalarParameter(paramName, inputs, outputs, globalSizes, i);
+            System.out.printf("[MCP] Setting scalar param '%s' = %d%n", paramName, sizeValue);
+            accessors.set(paramIndex++, Integer.valueOf(sizeValue), Access.NONE);
+        }
 
         // 6. Create new TaskGraph with prebuiltTask
         String graphName = "mcp_bench";
@@ -470,6 +614,26 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         // Calculate average time in ms
         long sum = benchTimes.stream().mapToLong(Long::longValue).sum();
         long avgNs = sum / benchTimes.size();
+
+        // Validate: if all times are 0, the kernel failed to execute
+        boolean allZero = benchTimes.stream().allMatch(t -> t == 0);
+        if (allZero || avgNs == 0) {
+            System.err.println("[MCP] ERROR: Optimized kernel failed to execute (0ms timing indicates compilation/execution failure)");
+            lastValidationError = "Kernel execution failed (0ms timing)";
+            return Double.MAX_VALUE;  // Treat as failed optimization
+        }
+
+        // Validate output correctness
+        ValidationResult validation = validateOutputs(outputs);
+        if (!validation.passed()) {
+            System.err.printf("[MCP] ✗ Validation %s%n", validation);
+            lastValidationError = validation.message();
+            return Double.MAX_VALUE;  // Treat as failed optimization - wrong results
+        } else {
+            System.out.printf("[MCP] ✓ Validation %s%n", validation);
+            lastValidationError = null;
+        }
+
         return avgNs / 1_000_000.0;
     }
 
@@ -534,6 +698,161 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
 
         System.err.println("[MCP] Could not extract entry point from kernel");
         return null;
+    }
+
+    // =========================================================================
+    // MCP Output Validation
+    // =========================================================================
+
+    /**
+     * Store the current output values from the original kernel execution.
+     * Called before running the optimized kernel.
+     */
+    private void storeOriginalOutputs(List<Object> outputs) {
+        originalOutputValues = new ArrayList<>();
+        for (Object output : outputs) {
+            float[] copy = copyOutputToFloatArray(output);
+            if (copy != null) {
+                originalOutputValues.add(copy);
+            }
+        }
+        if (!originalOutputValues.isEmpty()) {
+            System.out.printf("[MCP] Stored %d output arrays for validation%n", originalOutputValues.size());
+        }
+    }
+
+    /**
+     * Copy output object to a float array for comparison.
+     * Supports FloatArray, DoubleArray, and common array types.
+     */
+    private float[] copyOutputToFloatArray(Object output) {
+        try {
+            String className = output.getClass().getName();
+
+            // Handle FloatArray
+            if (className.contains("FloatArray")) {
+                java.lang.reflect.Method getSize = output.getClass().getMethod("getSize");
+                int size = (int) getSize.invoke(output);
+                java.lang.reflect.Method get = output.getClass().getMethod("get", int.class);
+
+                float[] copy = new float[size];
+                for (int i = 0; i < size; i++) {
+                    copy[i] = (float) get.invoke(output, i);
+                }
+                return copy;
+            }
+
+            // Handle DoubleArray (convert to float for comparison)
+            if (className.contains("DoubleArray")) {
+                java.lang.reflect.Method getSize = output.getClass().getMethod("getSize");
+                int size = (int) getSize.invoke(output);
+                java.lang.reflect.Method get = output.getClass().getMethod("get", int.class);
+
+                float[] copy = new float[size];
+                for (int i = 0; i < size; i++) {
+                    copy[i] = (float) (double) get.invoke(output, i);
+                }
+                return copy;
+            }
+
+            // Handle primitive float[]
+            if (output instanceof float[]) {
+                return ((float[]) output).clone();
+            }
+
+            // Handle primitive double[]
+            if (output instanceof double[]) {
+                double[] d = (double[]) output;
+                float[] copy = new float[d.length];
+                for (int i = 0; i < d.length; i++) {
+                    copy[i] = (float) d[i];
+                }
+                return copy;
+            }
+
+            System.err.printf("[MCP] Warning: Unknown output type %s, skipping validation%n", className);
+            return null;
+        } catch (Exception e) {
+            System.err.println("[MCP] Error copying output: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Validate the current outputs against stored original outputs.
+     * Returns a ValidationResult with pass/fail status and error details.
+     *
+     * Detects two types of failures:
+     * 1. Compilation failure: all outputs are 0.0 (kernel didn't execute)
+     * 2. Validation failure: outputs differ from expected values
+     */
+    private ValidationResult validateOutputs(List<Object> outputs) {
+        if (originalOutputValues == null || originalOutputValues.isEmpty()) {
+            return new ValidationResult(true, "No original outputs to compare", 0, 0, -1);
+        }
+
+        float maxDiff = 0;
+        int maxDiffIndex = -1;
+        int outputIdx = 0;
+        boolean allZeros = true;  // Track if all current outputs are zero (likely compilation failure)
+        int totalElements = 0;
+
+        for (int i = 0; i < outputs.size() && i < originalOutputValues.size(); i++) {
+            float[] original = originalOutputValues.get(i);
+            float[] current = copyOutputToFloatArray(outputs.get(i));
+
+            if (current == null || original.length != current.length) {
+                String error = String.format("Output %d size mismatch: expected %d, got %d",
+                        i, original.length, current != null ? current.length : 0);
+                return new ValidationResult(false, error, 0, 0, -1);
+            }
+
+            for (int j = 0; j < original.length; j++) {
+                totalElements++;
+                if (current[j] != 0.0f) {
+                    allZeros = false;
+                }
+                float diff = Math.abs(original[j] - current[j]);
+                if (diff > maxDiff) {
+                    maxDiff = diff;
+                    maxDiffIndex = j;
+                    outputIdx = i;
+                }
+                if (diff > MCP_VALIDATION_TOLERANCE) {
+                    // Check if this looks like a compilation failure (all zeros so far)
+                    if (allZeros && original[j] != 0.0f) {
+                        // Current is 0, original is non-zero - likely compilation failure
+                        String error = String.format(
+                                "LIKELY COMPILATION FAILURE: Output[%d][%d] is 0.0 but expected %.6f. " +
+                                "All %d output values are 0.0 - kernel probably failed to compile or execute. " +
+                                "Check for syntax errors, undefined macros, or wrong entry point name.",
+                                i, j, original[j], totalElements);
+                        return new ValidationResult(false, error, maxDiff, MCP_VALIDATION_TOLERANCE, j);
+                    }
+                    String error = String.format("Output[%d][%d] mismatch: expected %.6f, got %.6f (diff=%.6f)",
+                            i, j, original[j], current[j], diff);
+                    return new ValidationResult(false, error, maxDiff, MCP_VALIDATION_TOLERANCE, j);
+                }
+            }
+        }
+
+        return new ValidationResult(true,
+                String.format("Max diff: %.2e at output[%d][%d]", maxDiff, outputIdx, maxDiffIndex),
+                maxDiff, MCP_VALIDATION_TOLERANCE, maxDiffIndex);
+    }
+
+    /**
+     * Result of output validation.
+     */
+    private record ValidationResult(boolean passed, String message, float maxDiff, float tolerance, int maxDiffIndex) {
+        @Override
+        public String toString() {
+            if (passed) {
+                return String.format("PASSED (%s, tolerance=%.0e)", message, tolerance);
+            } else {
+                return String.format("FAILED: %s", message);
+            }
+        }
     }
 
     /**
@@ -628,12 +947,12 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
     }
 
     /**
-     * Resolve global work size from gridConfig and inputs.
+     * Resolve global work size from gridConfig and inputs/outputs.
      * Supports 1D, 2D, and 3D grids, including non-square configurations.
      *
      * For expressions like "D * 32", evaluates using detected dimensions.
      */
-    private int[] resolveGlobalWorkSize(MCPKernelOptimizer.GridConfig gridConfig, List<Object> inputs) {
+    private int[] resolveGlobalWorkSize(MCPKernelOptimizer.GridConfig gridConfig, List<Object> inputs, List<Object> outputs) {
         if (gridConfig == null) {
             // Fallback to 2D square matrix assumption
             int size = determineProblemSize(inputs.get(0));
@@ -644,14 +963,26 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         String[] globalParams = gridConfig.globalWorkSize();
 
         // Get base sizes from inputs
-        int arraySize = getArraySize(inputs.get(0));  // Total elements
+        int inputArraySize = getArraySize(inputs.get(0));  // Total elements in first input
         int matrixDim = determineProblemSize(inputs.get(0));  // sqrt for matrices
+
+        // Get output dimension (important for matrix-vector: output size = d)
+        int outputSize = outputs.isEmpty() ? matrixDim : getArraySize(outputs.get(0));
+
+        // For non-square operations, detect dimensions from input/output relationship
+        // Matrix-vector: W[d,n] * x[n] = y[d]
+        // So d = outputSize, n = inputArraySize (for vector input)
+        int inputDim = inputArraySize;  // n (columns)
+        int outputDim = outputSize;     // d (rows)
+
+        System.out.printf("[MCP] Detected dimensions: inputDim=%d, outputDim=%d, matrixDim=%d%n",
+                inputDim, outputDim, matrixDim);
 
         // Resolve each dimension
         int[] globalSizes = new int[dims];
         for (int i = 0; i < dims; i++) {
             String param = (i < globalParams.length) ? globalParams[i] : globalParams[0];
-            globalSizes[i] = resolveGlobalSizeExpression(param, arraySize, matrixDim, inputs);
+            globalSizes[i] = resolveGlobalSizeExpression(param, inputArraySize, matrixDim, inputDim, outputDim, inputs);
         }
 
         System.out.printf("[MCP] %dD kernel: resolved global work size %s%n",
@@ -663,7 +994,7 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
      * Resolve a global size expression to a concrete value.
      * Handles parameter names and simple expressions like "D * 32".
      */
-    private int resolveGlobalSizeExpression(String expr, int arraySize, int matrixDim, List<Object> inputs) {
+    private int resolveGlobalSizeExpression(String expr, int arraySize, int matrixDim, int inputDim, int outputDim, List<Object> inputs) {
         expr = expr.trim();
 
         // Handle expressions with multiplication (e.g., "D * 32", "outputDim * 32")
@@ -676,7 +1007,7 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
                     result *= Integer.parseInt(part);
                 } else {
                     // Resolve the variable part
-                    result *= resolveParameterName(part, arraySize, matrixDim, inputs);
+                    result *= resolveParameterName(part, arraySize, matrixDim, inputDim, outputDim, inputs);
                 }
             }
             return result;
@@ -688,27 +1019,37 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         }
 
         // Handle parameter names
-        return resolveParameterName(expr, arraySize, matrixDim, inputs);
+        return resolveParameterName(expr, arraySize, matrixDim, inputDim, outputDim, inputs);
     }
 
     /**
      * Resolve a parameter name to its value.
+     * Uses inputDim (n) for input-related params, outputDim (d) for output-related params.
      */
-    private int resolveParameterName(String paramName, int arraySize, int matrixDim, List<Object> inputs) {
+    private int resolveParameterName(String paramName, int arraySize, int matrixDim, int inputDim, int outputDim, List<Object> inputs) {
         paramName = paramName.toLowerCase();
 
-        // Common parameter name patterns
-        if (paramName.contains("numbodies") || paramName.contains("num_bodies") ||
-            paramName.equals("n") || paramName.equals("length") || paramName.contains("arraylength")) {
+        // 'd' is typically the OUTPUT dimension (rows, number of outputs)
+        if (paramName.equals("d") || paramName.contains("output") || paramName.equals("rows") ||
+            paramName.equals("numrows") || paramName.equals("m")) {
+            System.out.printf("[MCP] Resolving '%s' to outputDim=%d%n", paramName, outputDim);
+            return outputDim;
+        }
+
+        // 'n' is typically the INPUT dimension (columns, input length)
+        if (paramName.equals("n") || paramName.equals("length") || paramName.contains("arraylength") ||
+            paramName.equals("cols") || paramName.equals("numcols") || paramName.contains("input")) {
+            System.out.printf("[MCP] Resolving '%s' to inputDim=%d%n", paramName, inputDim);
+            return inputDim;
+        }
+
+        // numBodies and similar - use full array size
+        if (paramName.contains("numbodies") || paramName.contains("num_bodies")) {
             return arraySize;
         }
-        if (paramName.equals("size") || paramName.contains("dim") || paramName.equals("d") ||
-            paramName.contains("rows") || paramName.contains("cols") ||
-            paramName.contains("width") || paramName.contains("height")) {
-            return matrixDim;
-        }
-        if (paramName.contains("output")) {
-            // For reductions, output size might be different
+
+        // 'size' for square matrices
+        if (paramName.equals("size")) {
             return matrixDim;
         }
 
@@ -732,8 +1073,191 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
             }
         }
 
-        // Default: use matrix dimension
-        return matrixDim;
+        // Default: use output dimension (safer for 1D kernels)
+        System.out.printf("[MCP] Unknown param '%s', defaulting to outputDim=%d%n", paramName, outputDim);
+        return outputDim;
+    }
+
+    /**
+     * Extract the names of scalar parameters from the kernel signature.
+     * Scalar parameters are the last N parameters (after data objects).
+     * E.g., for "..., __private int n, __private int d" returns ["n", "d"]
+     *
+     * Note: kernelSig is already the parameter list without parentheses
+     * (as returned by extractKernelSignature).
+     */
+    private List<String> extractScalarParameterNames(String kernelSig, int scalarCount) {
+        List<String> names = new ArrayList<>();
+        if (scalarCount <= 0 || kernelSig == null || kernelSig.isEmpty()) return names;
+
+        // kernelSig is already the parameter list (without parentheses)
+        // Split by comma to get individual parameters
+        String[] params = kernelSig.split(",");
+
+        // Get the last scalarCount parameters
+        int startIdx = params.length - scalarCount;
+        for (int i = startIdx; i < params.length && i >= 0; i++) {
+            String param = params[i].trim();
+            // Extract just the parameter name (last word)
+            String[] words = param.split("\\s+");
+            if (words.length > 0) {
+                String name = words[words.length - 1];
+                // Remove any pointer/array symbols
+                name = name.replaceAll("[*\\[\\]]", "");
+                names.add(name);
+                System.out.printf("[MCP] DEBUG: Extracted param name '%s' from '%s'%n", name, param);
+            }
+        }
+        return names;
+    }
+
+    /**
+     * Extract the names of data (array) parameters from the kernel signature.
+     * Data parameters are __global uchar* parameters (first N after TornadoVM internal params).
+     * E.g., for "..., __global uchar *x, __global uchar *hb, __global uchar *w, __private int n"
+     * with dataCount=3 returns ["x", "hb", "w"]
+     */
+    private List<String> extractDataParameterNames(String kernelSig, int dataCount) {
+        List<String> names = new ArrayList<>();
+        if (dataCount <= 0 || kernelSig == null || kernelSig.isEmpty()) return names;
+
+        // kernelSig is the parameter list (without parentheses)
+        String[] params = kernelSig.split(",");
+
+        // Skip first 4 TornadoVM internal params, take next dataCount params
+        int startIdx = 4;  // After _kernel_context, _constant_region, _local_region, _atomics
+        for (int i = startIdx; i < startIdx + dataCount && i < params.length; i++) {
+            String param = params[i].trim();
+            // Extract just the parameter name (last word)
+            String[] words = param.split("\\s+");
+            if (words.length > 0) {
+                String name = words[words.length - 1];
+                // Remove any pointer/array symbols
+                name = name.replaceAll("[*\\[\\]]", "");
+                names.add(name);
+            }
+        }
+        return names;
+    }
+
+    /**
+     * Match a kernel parameter name to the corresponding data object from inputs/outputs.
+     * Uses naming heuristics and size matching.
+     */
+    private Object matchParameterToDataObject(String paramName, List<Object> inputs, List<Object> outputs) {
+        String name = paramName.toLowerCase();
+
+        // Heuristic 1: Output indicators (hb, out, result, dst, output, y)
+        if (name.equals("hb") || name.contains("out") || name.contains("result") ||
+            name.contains("dst") || name.equals("y") || name.equals("c")) {
+            // Return first available output
+            if (!outputs.isEmpty()) {
+                return outputs.get(0);
+            }
+        }
+
+        // Heuristic 2: Input vector indicators (x, input, src, vec, in)
+        if (name.equals("x") || name.contains("input") || name.contains("src") ||
+            name.equals("vec") || name.contains("in") && !name.contains("out")) {
+            // Return smallest input (likely the vector, not the matrix)
+            return findSmallestArray(inputs);
+        }
+
+        // Heuristic 3: Weight/matrix indicators (w, weight, mat, matrix, a, b)
+        if (name.equals("w") || name.contains("weight") || name.contains("mat") ||
+            name.equals("a") || name.equals("b")) {
+            // Return largest input (likely the matrix)
+            return findLargestArray(inputs);
+        }
+
+        // Fallback: Return first available from either list
+        if (!inputs.isEmpty()) return inputs.get(0);
+        if (!outputs.isEmpty()) return outputs.get(0);
+        return null;
+    }
+
+    /**
+     * Find the array with smallest size from a list.
+     */
+    private Object findSmallestArray(List<Object> arrays) {
+        if (arrays.isEmpty()) return null;
+        Object smallest = arrays.get(0);
+        int smallestSize = getArraySize(smallest);
+        for (Object arr : arrays) {
+            int size = getArraySize(arr);
+            if (size < smallestSize) {
+                smallestSize = size;
+                smallest = arr;
+            }
+        }
+        return smallest;
+    }
+
+    /**
+     * Find the array with largest size from a list.
+     */
+    private Object findLargestArray(List<Object> arrays) {
+        if (arrays.isEmpty()) return null;
+        Object largest = arrays.get(0);
+        int largestSize = getArraySize(largest);
+        for (Object arr : arrays) {
+            int size = getArraySize(arr);
+            if (size > largestSize) {
+                largestSize = size;
+                largest = arr;
+            }
+        }
+        return largest;
+    }
+
+    /**
+     * Resolve a scalar parameter to its appropriate value based on its name.
+     * Maps parameter names like 'n' to input dimension and 'd' to output dimension.
+     */
+    private int resolveScalarParameter(String paramName, List<Object> inputs, List<Object> outputs,
+                                       int[] globalSizes, int paramIndex) {
+        // Get actual sizes from arrays
+        int inputArraySize = inputs.isEmpty() ? 1024 : getArraySize(inputs.get(0));
+        int outputArraySize = outputs.isEmpty() ? 1024 : getArraySize(outputs.get(0));
+        int matrixDim = inputs.isEmpty() ? 1024 : determineProblemSize(inputs.get(0));
+
+        // Use parameter name to determine the right value
+        String name = paramName.toLowerCase();
+
+        // 'n' typically means input dimension (columns, vector length)
+        if (name.equals("n") || name.contains("col") || name.equals("length") ||
+            name.contains("input") || name.equals("width")) {
+            return inputArraySize;
+        }
+
+        // 'd' typically means output dimension (rows, number of outputs)
+        if (name.equals("d") || name.contains("row") || name.equals("m") ||
+            name.contains("output") || name.equals("height")) {
+            return outputArraySize;
+        }
+
+        // 'size' for square matrices
+        if (name.equals("size")) {
+            return matrixDim;
+        }
+
+        // 'localWorkGroupSize' - return the local work size
+        if (name.contains("local") || name.contains("workgroup")) {
+            return globalSizes.length > 0 ? 32 : 32;  // Default to 32 for Apple M4
+        }
+
+        // Fallback: use globalSizes based on parameter index, but be smart about it
+        // For matrix-vector: first scalar is usually 'n' (input), second is 'd' (output)
+        if (paramIndex == 0) {
+            // First scalar param - likely 'n' (input dimension)
+            return inputArraySize;
+        } else if (paramIndex == 1) {
+            // Second scalar param - likely 'd' (output dimension)
+            return outputArraySize;
+        }
+
+        // Final fallback
+        return paramIndex < globalSizes.length ? globalSizes[paramIndex] : globalSizes[0];
     }
 
     /**
@@ -763,21 +1287,28 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
             System.out.printf("[MCP] Grid pattern: %s%n", gridConfig.pattern());
         }
 
+        // Round up global sizes to be divisible by local sizes (OpenCL requirement)
+        int[] roundedGlobalSizes = roundUpGlobalSizes(globalSizes, localSize);
+        if (!java.util.Arrays.equals(globalSizes, roundedGlobalSizes)) {
+            System.out.printf("[MCP] Rounded global work size: %s -> %s (to be divisible by local)%n",
+                    java.util.Arrays.toString(globalSizes), java.util.Arrays.toString(roundedGlobalSizes));
+        }
+
         if (dims == 1) {
             // 1D grid
-            WorkerGrid1D workerGrid = new WorkerGrid1D(globalSizes[0]);
+            WorkerGrid1D workerGrid = new WorkerGrid1D(roundedGlobalSizes[0]);
             if (localSize != null && localSize.length >= 1) {
                 workerGrid.setLocalWork(localSize[0], 1, 1);
                 System.out.printf("[MCP] PrebuiltTask 1D grid: global=[%d], local=[%d]%n",
-                        globalSizes[0], localSize[0]);
+                        roundedGlobalSizes[0], localSize[0]);
             } else {
-                System.out.printf("[MCP] PrebuiltTask 1D grid: global=[%d], local=default%n", globalSizes[0]);
+                System.out.printf("[MCP] PrebuiltTask 1D grid: global=[%d], local=default%n", roundedGlobalSizes[0]);
             }
             return workerGrid;
         } else if (dims == 2) {
             // 2D grid (supports non-square)
-            int globalX = globalSizes[0];
-            int globalY = globalSizes.length > 1 ? globalSizes[1] : globalSizes[0];
+            int globalX = roundedGlobalSizes[0];
+            int globalY = roundedGlobalSizes.length > 1 ? roundedGlobalSizes[1] : roundedGlobalSizes[0];
             WorkerGrid2D workerGrid = new WorkerGrid2D(globalX, globalY);
 
             if (localSize != null && localSize.length >= 2) {
@@ -794,9 +1325,9 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
             return workerGrid;
         } else {
             // 3D grid
-            int globalX = globalSizes[0];
-            int globalY = globalSizes.length > 1 ? globalSizes[1] : globalSizes[0];
-            int globalZ = globalSizes.length > 2 ? globalSizes[2] : 1;
+            int globalX = roundedGlobalSizes[0];
+            int globalY = roundedGlobalSizes.length > 1 ? roundedGlobalSizes[1] : roundedGlobalSizes[0];
+            int globalZ = roundedGlobalSizes.length > 2 ? roundedGlobalSizes[2] : 1;
             WorkerGrid3D workerGrid = new WorkerGrid3D(globalX, globalY, globalZ);
 
             if (localSize != null && localSize.length >= 3) {
@@ -813,6 +1344,25 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
             }
             return workerGrid;
         }
+    }
+
+    /**
+     * Round up global work sizes to be evenly divisible by local work sizes.
+     * OpenCL requires global_size[i] % local_size[i] == 0.
+     */
+    private int[] roundUpGlobalSizes(int[] globalSizes, int[] localSizes) {
+        if (localSizes == null || localSizes.length == 0) {
+            return globalSizes;
+        }
+
+        int[] rounded = new int[globalSizes.length];
+        for (int i = 0; i < globalSizes.length; i++) {
+            int local = (i < localSizes.length) ? localSizes[i] : 1;
+            if (local <= 0) local = 1;
+            // Round up: ((global + local - 1) / local) * local
+            rounded[i] = ((globalSizes[i] + local - 1) / local) * local;
+        }
+        return rounded;
     }
 
     /**

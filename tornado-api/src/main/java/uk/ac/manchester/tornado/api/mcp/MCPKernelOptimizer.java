@@ -32,14 +32,20 @@ public class MCPKernelOptimizer {
     private final boolean testMode;
 
     /**
-     * Record for tracking a previous optimization attempt that was slower.
+     * Record for tracking a previous optimization attempt that failed or was slower.
      */
     public record PreviousAttempt(
             String optimizedKernel,
             double originalTimeMs,
             double optimizedTimeMs,
-            int attemptNumber
-    ) {}
+            int attemptNumber,
+            String validationError  // null if validation passed, error message if failed
+    ) {
+        // Constructor without validation error for backwards compatibility
+        public PreviousAttempt(String optimizedKernel, double originalTimeMs, double optimizedTimeMs, int attemptNumber) {
+            this(optimizedKernel, originalTimeMs, optimizedTimeMs, attemptNumber, null);
+        }
+    }
 
     /**
      * Grid configuration for launching the optimized kernel.
@@ -67,6 +73,19 @@ public class MCPKernelOptimizer {
             double optimizedTimeMs,  // Store the benchmarked time to avoid re-benchmarking
             GridConfig gridConfig    // Grid configuration from LLM (nullable)
     ) {}
+
+    /**
+     * Result of benchmarking an optimized kernel.
+     * Includes both timing and validation status.
+     */
+    public record BenchmarkResult(
+            double timeMs,           // Execution time in milliseconds (Double.MAX_VALUE if failed)
+            String validationError   // null if validation passed, error message if failed
+    ) {
+        public boolean isValid() {
+            return validationError == null && timeMs < Double.MAX_VALUE;
+        }
+    }
 
     public MCPKernelOptimizer() {
         this.testMode = Boolean.getBoolean("tornado.mcp.test");
@@ -127,19 +146,19 @@ public class MCPKernelOptimizer {
      * Optimize a kernel with iterative feedback loop.
      *
      * If the optimized kernel is slower than the original, retry with feedback
-     * up to MAX_ATTEMPTS times.
+     * up to MAX_ATTEMPTS times. Includes validation feedback for incorrect results.
      *
      * @param kernelSource     The original kernel source code
      * @param backend          "opencl" or "ptx"
      * @param originalTimeMs   Original kernel execution time in milliseconds
-     * @param benchmarkFunc    Function to benchmark a kernel with grid config and return execution time in ms
+     * @param benchmarkFunc    Function to benchmark a kernel with grid config, returns BenchmarkResult with timing and validation
      * @return OptimizationResult with the best kernel found
      */
     public OptimizationResult optimizeWithFeedback(
             String kernelSource,
             String backend,
             double originalTimeMs,
-            java.util.function.BiFunction<String, GridConfig, Double> benchmarkFunc) {
+            java.util.function.BiFunction<String, GridConfig, BenchmarkResult> benchmarkFunc) {
 
         if (kernelSource == null || kernelSource.isEmpty()) {
             return new OptimizationResult(kernelSource, 0, false, originalTimeMs, null);
@@ -194,13 +213,32 @@ public class MCPKernelOptimizer {
 
                 // Benchmark the optimized kernel
                 System.out.println("[MCP] Benchmarking optimized kernel...");
-                double optimizedTimeMs = benchmarkFunc.apply(optimized, gridConfig);
+                BenchmarkResult benchmarkResult = benchmarkFunc.apply(optimized, gridConfig);
+                double optimizedTimeMs = benchmarkResult.timeMs();
+                String validationError = benchmarkResult.validationError();
+
+                // Check for validation failure first
+                if (validationError != null) {
+                    System.out.printf("[MCP] ✗ Attempt %d VALIDATION FAILED: %s%n", attempt, validationError);
+                    // Track this failed attempt with validation error for feedback
+                    previousAttempts.add(new PreviousAttempt(
+                            optimized,
+                            originalTimeMs,
+                            optimizedTimeMs,
+                            attempt,
+                            validationError
+                    ));
+                    if (attempt < maxAttempts) {
+                        System.out.println("[MCP] Retrying with validation error feedback...");
+                    }
+                    continue;  // Skip to next attempt
+                }
 
                 double speedup = originalTimeMs / optimizedTimeMs;
                 // Must be at least 2% faster to count as success (handles measurement noise)
                 boolean isFaster = optimizedTimeMs <= (originalTimeMs * MIN_SPEEDUP_THRESHOLD);
 
-                // Track best result seen
+                // Track best result seen (only if validation passed)
                 if (optimizedTimeMs < bestTimeMs) {
                     bestKernel = optimized;
                     bestTimeMs = optimizedTimeMs;
@@ -222,12 +260,13 @@ public class MCPKernelOptimizer {
                                 attempt, originalTimeMs, optimizedTimeMs, -diff);
                     }
 
-                    // Track this failed attempt for feedback
+                    // Track this failed attempt for feedback (no validation error)
                     previousAttempts.add(new PreviousAttempt(
                             optimized,
                             originalTimeMs,
                             optimizedTimeMs,
-                            attempt
+                            attempt,
+                            null  // No validation error
                     ));
 
                     if (attempt < maxAttempts) {
@@ -281,6 +320,10 @@ public class MCPKernelOptimizer {
                 json.append("\"original_time_ms\": ").append(attempt.originalTimeMs()).append(", ");
                 json.append("\"optimized_time_ms\": ").append(attempt.optimizedTimeMs()).append(", ");
                 json.append("\"attempt_number\": ").append(attempt.attemptNumber());
+                // Include validation error if present
+                if (attempt.validationError() != null) {
+                    json.append(", \"validation_error\": ").append(escapeJson(attempt.validationError()));
+                }
                 json.append("}");
             }
             json.append("]");
