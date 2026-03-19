@@ -526,36 +526,57 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         AccessorParameters accessors = new AccessorParameters(numParams);
 
         // CRITICAL: Parameters must be added in the EXACT order the kernel expects them.
-        // The kernel signature defines the order (e.g., x, hb, w for matrixVectorParallel).
-        // We cannot just add all inputs then all outputs - they may be interleaved!
+        // For NBody, params are interleaved: numBodies(scalar), refPos(array), refVel(array), delT(scalar), espSqr(scalar)
+        // We process ALL user params in signature order, checking type for each.
 
-        // Extract data parameter names from kernel signature
-        List<String> dataParamNames = extractDataParameterNames(kernelSig, dataParams);
-        System.out.printf("[MCP] Kernel data params in order: %s%n", dataParamNames);
-
-        // Match each kernel parameter to the correct input/output object
-        int paramIndex = 0;
         List<Object> remainingInputs = new ArrayList<>(inputs);
         List<Object> remainingOutputs = new ArrayList<>(outputs);
 
-        for (String paramName : dataParamNames) {
-            Object matched = matchParameterToDataObject(paramName, remainingInputs, remainingOutputs);
-            if (matched != null) {
-                // Determine access type based on which list it came from
-                Access accessType = remainingInputs.contains(matched) ? Access.READ_ONLY : Access.WRITE_ONLY;
-                // Remove from the appropriate list
-                if (!remainingInputs.remove(matched)) {
-                    remainingOutputs.remove(matched);
+        // Get all user parameters from signature in order
+        String[] allParams = kernelSig.split(",");
+        int paramIndex = 0;
+        int startIdx = 4;  // Skip 4 TornadoVM internal params
+
+        System.out.printf("[MCP] Processing %d user params from signature (after %d internal)%n",
+                allParams.length - startIdx, startIdx);
+
+        for (int i = startIdx; i < allParams.length; i++) {
+            String param = allParams[i].trim();
+            String[] words = param.split("\\s+");
+            String paramName = words.length > 0 ? words[words.length - 1].replaceAll("[*\\[\\]]", "") : "";
+
+            if (param.contains("__global") && param.contains("uchar")) {
+                // This is a data array parameter
+                Object matched = matchParameterToDataObject(paramName, remainingInputs, remainingOutputs);
+                if (matched != null) {
+                    Access accessType = remainingInputs.contains(matched) ? Access.READ_ONLY : Access.WRITE_ONLY;
+                    if (!remainingInputs.remove(matched)) {
+                        remainingOutputs.remove(matched);
+                    }
+                    accessors.set(paramIndex++, matched, accessType);
+                    System.out.printf("[MCP] Param[%d] '%s' -> %s (%s) [ARRAY]%n", i - startIdx, paramName,
+                            matched.getClass().getSimpleName(), accessType);
+                } else {
+                    System.err.printf("[MCP] WARNING: Could not match array param '%s' to any data object%n", paramName);
                 }
-                accessors.set(paramIndex++, matched, accessType);
-                System.out.printf("[MCP] Param '%s' -> %s (%s)%n", paramName,
-                        matched.getClass().getSimpleName(), accessType);
+            } else if (param.contains("__private")) {
+                // This is a scalar parameter - determine if int or float
+                boolean isFloat = param.contains("float");
+                if (isFloat) {
+                    float floatValue = resolveFloatParameter(paramName, inputs, outputs);
+                    accessors.set(paramIndex++, Float.valueOf(floatValue), Access.NONE);
+                    System.out.printf("[MCP] Param[%d] '%s' = %.6f [SCALAR FLOAT]%n", i - startIdx, paramName, floatValue);
+                } else {
+                    int intValue = resolveScalarParameter(paramName, inputs, outputs, globalSizes, paramIndex);
+                    accessors.set(paramIndex++, Integer.valueOf(intValue), Access.NONE);
+                    System.out.printf("[MCP] Param[%d] '%s' = %d [SCALAR INT]%n", i - startIdx, paramName, intValue);
+                }
             } else {
-                System.err.printf("[MCP] WARNING: Could not match param '%s' to any data object%n", paramName);
+                System.out.printf("[MCP] Skipping unknown param type: '%s'%n", param);
             }
         }
 
-        // Add any remaining unmatched objects (fallback)
+        // Add any remaining unmatched objects as fallback
         for (Object input : remainingInputs) {
             accessors.set(paramIndex++, input, Access.READ_ONLY);
             System.out.printf("[MCP] Fallback: added remaining input %s%n", input.getClass().getSimpleName());
@@ -563,16 +584,6 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         for (Object output : remainingOutputs) {
             accessors.set(paramIndex++, output, Access.WRITE_ONLY);
             System.out.printf("[MCP] Fallback: added remaining output %s%n", output.getClass().getSimpleName());
-        }
-
-        // Add scalar size parameters if kernel expects them
-        // Extract parameter names from kernel signature to map them to correct sizes
-        List<String> scalarParamNames = extractScalarParameterNames(kernelSig, scalarCount);
-        for (int i = 0; i < scalarCount; i++) {
-            String paramName = i < scalarParamNames.size() ? scalarParamNames.get(i) : "";
-            int sizeValue = resolveScalarParameter(paramName, inputs, outputs, globalSizes, i);
-            System.out.printf("[MCP] Setting scalar param '%s' = %d%n", paramName, sizeValue);
-            accessors.set(paramIndex++, Integer.valueOf(sizeValue), Access.NONE);
         }
 
         // 6. Create new TaskGraph with prebuiltTask
@@ -1080,8 +1091,10 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
 
     /**
      * Extract the names of scalar parameters from the kernel signature.
-     * Scalar parameters are the last N parameters (after data objects).
-     * E.g., for "..., __private int n, __private int d" returns ["n", "d"]
+     * Scalar parameters are __private int/float parameters (NOT __global arrays).
+     * This method looks at the TYPE of each parameter, not just position.
+     * E.g., for "..., __private int numBodies, __global uchar *refPos, __private float delT"
+     * returns ["numBodies", "delT"] - only the __private parameters
      *
      * Note: kernelSig is already the parameter list without parentheses
      * (as returned by extractKernelSignature).
@@ -1094,18 +1107,21 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         // Split by comma to get individual parameters
         String[] params = kernelSig.split(",");
 
-        // Get the last scalarCount parameters
-        int startIdx = params.length - scalarCount;
-        for (int i = startIdx; i < params.length && i >= 0; i++) {
+        // Skip first 4 TornadoVM internal params, then look for __private parameters
+        int startIdx = 4;  // After _kernel_context, _constant_region, _local_region, _atomics
+        for (int i = startIdx; i < params.length && names.size() < scalarCount; i++) {
             String param = params[i].trim();
-            // Extract just the parameter name (last word)
-            String[] words = param.split("\\s+");
-            if (words.length > 0) {
-                String name = words[words.length - 1];
-                // Remove any pointer/array symbols
-                name = name.replaceAll("[*\\[\\]]", "");
-                names.add(name);
-                System.out.printf("[MCP] DEBUG: Extracted param name '%s' from '%s'%n", name, param);
+            // Only include __private parameters (scalars), skip __global (arrays)
+            if (param.contains("__private")) {
+                // Extract just the parameter name (last word)
+                String[] words = param.split("\\s+");
+                if (words.length > 0) {
+                    String name = words[words.length - 1];
+                    // Remove any pointer/array symbols
+                    name = name.replaceAll("[*\\[\\]]", "");
+                    names.add(name);
+                    System.out.printf("[MCP] DEBUG: Extracted scalar param '%s' from '%s'%n", name, param);
+                }
             }
         }
         return names;
@@ -1113,9 +1129,10 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
 
     /**
      * Extract the names of data (array) parameters from the kernel signature.
-     * Data parameters are __global uchar* parameters (first N after TornadoVM internal params).
-     * E.g., for "..., __global uchar *x, __global uchar *hb, __global uchar *w, __private int n"
-     * with dataCount=3 returns ["x", "hb", "w"]
+     * Data parameters are __global uchar* parameters (NOT __private scalars).
+     * This method looks at the TYPE of each parameter, not just position.
+     * E.g., for "..., __private int numBodies, __global uchar *refPos, __global uchar *refVel, __private float delT"
+     * returns ["refPos", "refVel"] - only the __global parameters
      */
     private List<String> extractDataParameterNames(String kernelSig, int dataCount) {
         List<String> names = new ArrayList<>();
@@ -1124,17 +1141,20 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         // kernelSig is the parameter list (without parentheses)
         String[] params = kernelSig.split(",");
 
-        // Skip first 4 TornadoVM internal params, take next dataCount params
+        // Skip first 4 TornadoVM internal params, then look for __global parameters
         int startIdx = 4;  // After _kernel_context, _constant_region, _local_region, _atomics
-        for (int i = startIdx; i < startIdx + dataCount && i < params.length; i++) {
+        for (int i = startIdx; i < params.length && names.size() < dataCount; i++) {
             String param = params[i].trim();
-            // Extract just the parameter name (last word)
-            String[] words = param.split("\\s+");
-            if (words.length > 0) {
-                String name = words[words.length - 1];
-                // Remove any pointer/array symbols
-                name = name.replaceAll("[*\\[\\]]", "");
-                names.add(name);
+            // Only include __global parameters (arrays), skip __private (scalars)
+            if (param.contains("__global") && param.contains("uchar")) {
+                // Extract just the parameter name (last word)
+                String[] words = param.split("\\s+");
+                if (words.length > 0) {
+                    String name = words[words.length - 1];
+                    // Remove any pointer/array symbols
+                    name = name.replaceAll("[*\\[\\]]", "");
+                    names.add(name);
+                }
             }
         }
         return names;
@@ -1147,20 +1167,24 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
     private Object matchParameterToDataObject(String paramName, List<Object> inputs, List<Object> outputs) {
         String name = paramName.toLowerCase();
 
-        // Heuristic 1: Output indicators (hb, out, result, dst, output, y)
+        // Heuristic 1: Output indicators (hb, out, result, dst, output, y, vel for NBody velocity)
         if (name.equals("hb") || name.contains("out") || name.contains("result") ||
-            name.contains("dst") || name.equals("y") || name.equals("c")) {
+            name.contains("dst") || name.equals("y") || name.equals("c") ||
+            name.contains("vel") || name.equals("refvel")) {
             // Return first available output
             if (!outputs.isEmpty()) {
                 return outputs.get(0);
             }
         }
 
-        // Heuristic 2: Input vector indicators (x, input, src, vec, in)
+        // Heuristic 2: Input indicators (x, input, src, vec, in, pos for NBody position)
         if (name.equals("x") || name.contains("input") || name.contains("src") ||
-            name.equals("vec") || name.contains("in") && !name.contains("out")) {
-            // Return smallest input (likely the vector, not the matrix)
-            return findSmallestArray(inputs);
+            name.equals("vec") || (name.contains("in") && !name.contains("out")) ||
+            name.contains("pos") || name.equals("refpos")) {
+            // Return first input
+            if (!inputs.isEmpty()) {
+                return inputs.get(0);
+            }
         }
 
         // Heuristic 3: Weight/matrix indicators (w, weight, mat, matrix, a, b)
@@ -1224,6 +1248,14 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         // Use parameter name to determine the right value
         String name = paramName.toLowerCase();
 
+        // NBody: 'numBodies' - array size / 4 (each body has x,y,z,w)
+        if (name.equals("numbodies") || name.contains("bodies") || name.contains("particles")) {
+            int numBodies = inputArraySize / 4;
+            System.out.printf("[MCP] resolveScalarParameter: '%s' -> %d (inputArraySize=%d / 4)%n",
+                    paramName, numBodies, inputArraySize);
+            return numBodies;
+        }
+
         // 'n' typically means input dimension (columns, vector length)
         if (name.equals("n") || name.contains("col") || name.equals("length") ||
             name.contains("input") || name.equals("width")) {
@@ -1258,6 +1290,30 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
 
         // Final fallback
         return paramIndex < globalSizes.length ? globalSizes[paramIndex] : globalSizes[0];
+    }
+
+    /**
+     * Resolve a float scalar parameter to its appropriate value based on its name.
+     * Used for physics simulations like NBody (delT, espSqr).
+     */
+    private float resolveFloatParameter(String paramName, List<Object> inputs, List<Object> outputs) {
+        String name = paramName.toLowerCase();
+
+        // NBody: 'delT' - time delta (default to 0.005f as in TornadoVM examples)
+        if (name.equals("delt") || name.contains("delta") || name.contains("time") || name.contains("dt")) {
+            System.out.printf("[MCP] resolveFloatParameter: '%s' -> 0.005f (time delta)%n", paramName);
+            return 0.005f;
+        }
+
+        // NBody: 'espSqr' - epsilon squared for softening (default to 500.0f)
+        if (name.equals("espsqr") || name.contains("epsilon") || name.contains("soft")) {
+            System.out.printf("[MCP] resolveFloatParameter: '%s' -> 500.0f (epsilon squared)%n", paramName);
+            return 500.0f;
+        }
+
+        // Default fallback
+        System.out.printf("[MCP] resolveFloatParameter: '%s' -> 1.0f (default)%n", paramName);
+        return 1.0f;
     }
 
     /**
