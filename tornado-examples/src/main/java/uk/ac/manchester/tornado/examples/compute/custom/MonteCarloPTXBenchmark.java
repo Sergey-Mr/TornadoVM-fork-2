@@ -34,8 +34,8 @@ public class MonteCarloPTXBenchmark {
     private static final int WARM_UP_ITERATIONS = 50;
     private static final int BENCHMARK_ITERATIONS = 100;
 
-    // PTX entry point from TornadoVM-generated kernel
-    private static final String ENTRY_POINT = "s0_taskgraph_computemontecarlo_arrays_floatarray_16777216";
+    // PTX entry point (simple name)
+    private static final String ENTRY_POINT = "computeMontecarlo";
 
     public static void main(String[] args) throws TornadoExecutionPlanException {
         if (args.length < 1) {
