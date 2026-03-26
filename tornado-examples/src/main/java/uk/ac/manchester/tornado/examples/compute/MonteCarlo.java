@@ -73,10 +73,14 @@ public class MonteCarlo {
         ImmutableTaskGraph immutableTaskGraph = taskGraph.snapshot();
         TornadoExecutionPlan executor = new TornadoExecutionPlan(immutableTaskGraph);
 
+        // Run multiple iterations to trigger MCP optimization (needs 10+ runs)
+        int iterations = 20;
         long start = System.nanoTime();
-        executor.execute();
+        for (int i = 0; i < iterations; i++) {
+            executor.execute();
+        }
         long end = System.nanoTime();
-        long tornadoTime = (end - start);
+        long tornadoTime = (end - start) / iterations;
 
         float sum = 0;
         for (int j = 0; j < size; j++) {

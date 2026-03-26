@@ -120,8 +120,17 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
      */
     private boolean mcpOptimizationApplied = false;
     private int mcpExecutionCount = 0;
-    private static final int MCP_WARMUP_ITERATIONS = 5;
-    private static final int MCP_BENCHMARK_ITERATIONS = 10;
+
+    /**
+     * MCP warmup and benchmark iterations - configurable via system properties.
+     * -Dtornado.mcp.warmup=N     : Number of warmup iterations before collecting timing (default: 5)
+     * -Dtornado.mcp.benchmark=N  : Number of benchmark iterations to collect timing (default: 10)
+     *
+     * Total iterations before MCP triggers = warmup + benchmark
+     * Example: -Dtornado.mcp.warmup=2 -Dtornado.mcp.benchmark=3 triggers after 5 runs
+     */
+    private static final int MCP_WARMUP_ITERATIONS = Integer.getInteger("tornado.mcp.warmup", 5);
+    private static final int MCP_BENCHMARK_ITERATIONS = Integer.getInteger("tornado.mcp.benchmark", 10);
     private List<Long> originalKernelTimes = new ArrayList<>();
     private String originalKernelSource = null;  // Store for signature validation
 
@@ -253,6 +262,8 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
      */
     private void applyMCPOptimization() {
         mcpOptimizationApplied = true;  // Prevent re-entry
+        System.out.printf("[MCP] Triggered after %d warmup + %d benchmark iterations%n",
+                MCP_WARMUP_ITERATIONS, MCP_BENCHMARK_ITERATIONS);
 
         // Calculate statistics for original kernel (collected during warmup)
         long originalSum = originalKernelTimes.stream().mapToLong(Long::longValue).sum();
