@@ -64,6 +64,27 @@ public class MCPKernelOptimizer {
     }
 
     /**
+     * Device capabilities from OpenCL/CUDA query.
+     */
+    public record DeviceCapabilities(
+            int maxWorkGroupSize,
+            int[] maxWorkItemSizes,
+            long localMemorySize,
+            int computeUnits,
+            String deviceName,
+            int simdWidth  // 0 if unknown
+    ) {}
+
+    /**
+     * Execution context with actual parameter values.
+     */
+    public record ExecutionContext(
+            int[] globalWorkSize,
+            int[] localWorkSize,
+            java.util.Map<String, Integer> parameterValues
+    ) {}
+
+    /**
      * Result of an optimization attempt.
      */
     public record OptimizationResult(
@@ -119,6 +140,21 @@ public class MCPKernelOptimizer {
      * @return Optimized kernel source, or null if optimization failed
      */
     public String optimize(String kernelSource, String backend, long kernelTimeNs) {
+        return optimize(kernelSource, backend, kernelTimeNs, null, null);
+    }
+
+    /**
+     * Optimize a kernel with device capabilities and execution context.
+     *
+     * @param kernelSource        The original kernel source code
+     * @param backend             "opencl" or "ptx"
+     * @param kernelTimeNs        Kernel execution time from profiler (nanoseconds)
+     * @param deviceCapabilities  Device capabilities from OpenCL query (nullable)
+     * @param executionContext    Execution context with work sizes and parameter values (nullable)
+     * @return Optimized kernel source, or null if optimization failed
+     */
+    public String optimize(String kernelSource, String backend, long kernelTimeNs,
+                          DeviceCapabilities deviceCapabilities, ExecutionContext executionContext) {
         if (kernelSource == null || kernelSource.isEmpty()) {
             return null;
         }
@@ -126,8 +162,17 @@ public class MCPKernelOptimizer {
         try {
             System.out.println("[MCP] Sending kernel to " + mcpServerUrl + " for optimization...");
             System.out.println("[MCP] Backend: " + backend + ", Device: " + deviceFamily + ", Kernel time: " + kernelTimeNs + "ns");
+            if (deviceCapabilities != null) {
+                System.out.println("[MCP] Device: " + deviceCapabilities.deviceName() +
+                        ", MaxWorkGroup: " + deviceCapabilities.maxWorkGroupSize() +
+                        ", LocalMem: " + deviceCapabilities.localMemorySize() + " bytes");
+            }
+            if (executionContext != null && executionContext.parameterValues() != null) {
+                System.out.println("[MCP] Parameter values: " + executionContext.parameterValues());
+            }
 
-            MCPResponse response = callMCPServer(kernelSource, backend, deviceFamily, kernelTimeNs, null);
+            MCPResponse response = callMCPServer(kernelSource, backend, deviceFamily, kernelTimeNs,
+                    null, deviceCapabilities, executionContext);
 
             if (response != null && response.kernel() != null && !response.kernel().isEmpty()) {
                 System.out.println("[MCP] Optimization successful! Received " + response.kernel().length() + " chars");
@@ -284,7 +329,7 @@ public class MCPKernelOptimizer {
     }
 
     /**
-     * Make HTTP POST request to MCP server.
+     * Make HTTP POST request to MCP server (legacy signature for backwards compatibility).
      */
     private MCPResponse callMCPServer(
             String kernelCode,
@@ -292,6 +337,20 @@ public class MCPKernelOptimizer {
             String device,
             long kernelTimeNs,
             List<PreviousAttempt> previousAttempts) throws IOException {
+        return callMCPServer(kernelCode, backend, device, kernelTimeNs, previousAttempts, null, null);
+    }
+
+    /**
+     * Make HTTP POST request to MCP server with full context.
+     */
+    private MCPResponse callMCPServer(
+            String kernelCode,
+            String backend,
+            String device,
+            long kernelTimeNs,
+            List<PreviousAttempt> previousAttempts,
+            DeviceCapabilities deviceCapabilities,
+            ExecutionContext executionContext) throws IOException {
 
         URL url = new URL(mcpServerUrl);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
@@ -308,6 +367,57 @@ public class MCPKernelOptimizer {
         json.append("\"backend\": \"").append(backend).append("\", ");
         json.append("\"device_family\": \"").append(device).append("\", ");
         json.append("\"kernel_time_ns\": ").append(kernelTimeNs);
+
+        // Add device capabilities if provided
+        if (deviceCapabilities != null) {
+            json.append(", \"max_work_group_size\": ").append(deviceCapabilities.maxWorkGroupSize());
+            if (deviceCapabilities.maxWorkItemSizes() != null && deviceCapabilities.maxWorkItemSizes().length > 0) {
+                json.append(", \"max_work_item_sizes\": [");
+                for (int i = 0; i < deviceCapabilities.maxWorkItemSizes().length; i++) {
+                    if (i > 0) json.append(", ");
+                    json.append(deviceCapabilities.maxWorkItemSizes()[i]);
+                }
+                json.append("]");
+            }
+            json.append(", \"local_memory_size\": ").append(deviceCapabilities.localMemorySize());
+            json.append(", \"compute_units\": ").append(deviceCapabilities.computeUnits());
+            if (deviceCapabilities.deviceName() != null) {
+                json.append(", \"device_name\": \"").append(deviceCapabilities.deviceName().replace("\"", "\\\"")).append("\"");
+            }
+            if (deviceCapabilities.simdWidth() > 0) {
+                json.append(", \"simd_width\": ").append(deviceCapabilities.simdWidth());
+            }
+        }
+
+        // Add execution context if provided
+        if (executionContext != null) {
+            if (executionContext.globalWorkSize() != null && executionContext.globalWorkSize().length > 0) {
+                json.append(", \"global_work_size\": [");
+                for (int i = 0; i < executionContext.globalWorkSize().length; i++) {
+                    if (i > 0) json.append(", ");
+                    json.append(executionContext.globalWorkSize()[i]);
+                }
+                json.append("]");
+            }
+            if (executionContext.localWorkSize() != null && executionContext.localWorkSize().length > 0) {
+                json.append(", \"local_work_size\": [");
+                for (int i = 0; i < executionContext.localWorkSize().length; i++) {
+                    if (i > 0) json.append(", ");
+                    json.append(executionContext.localWorkSize()[i]);
+                }
+                json.append("]");
+            }
+            if (executionContext.parameterValues() != null && !executionContext.parameterValues().isEmpty()) {
+                json.append(", \"parameter_values\": {");
+                boolean first = true;
+                for (var entry : executionContext.parameterValues().entrySet()) {
+                    if (!first) json.append(", ");
+                    first = false;
+                    json.append("\"").append(entry.getKey()).append("\": ").append(entry.getValue());
+                }
+                json.append("}");
+            }
+        }
 
         // Add previous attempts if any
         if (previousAttempts != null && !previousAttempts.isEmpty()) {

@@ -251,9 +251,92 @@ When calling MCP with profiling data, provide:
   "copy_in_bytes": 3145776,
   "copy_out_bytes": 1048592,
   "global_work_size": [512, 512],
-  "local_work_size": [16, 16]
+  "local_work_size": [16, 16],
+  "parameter_values": {"size": 512},
+  "max_work_group_size": 1024,
+  "max_work_item_sizes": [1024, 1024, 64],
+  "local_memory_size": 65536,
+  "compute_units": 40,
+  "device_name": "Apple M4 Max",
+  "simd_width": 32
 }
 ```
+
+---
+
+## Grid Configuration
+
+### Why Grid Config Matters
+
+The optimized kernel often uses local memory tiling, which requires specific work-group dimensions:
+
+```c
+// Kernel uses 16x16 tiles
+__local float As[16][16];
+__local float Bs[16][16];
+
+int ly = get_local_id(0);  // Must be 0-15
+int lx = get_local_id(1);  // Must be 0-15
+As[ly][lx] = ...;          // Each thread loads one element
+```
+
+**If `local_work_size` doesn't match tile dimensions, the kernel will:**
+- Crash with out-of-bounds access
+- Produce incorrect results
+- Silently skip elements
+
+### Grid Config Structure
+
+MCP returns grid configuration along with the optimized kernel:
+
+```json
+{
+  "optimized_kernel": "...",
+  "grid_config": {
+    "dimensions": 2,
+    "global_work_size": ["size", "size"],
+    "local_work_size": [16, 16],
+    "pattern": "tiled"
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `dimensions` | int | 1, 2, or 3 |
+| `global_work_size` | string[] | Parameter names resolved at runtime (e.g., `["size", "size"]`) |
+| `local_work_size` | int[] | Concrete thread counts (e.g., `[16, 16]`) |
+| `pattern` | string | Optional: `"tiled"`, `"element-wise"`, `"reduction"`, `"parallel"` |
+
+### Using Grid Config in TornadoVM
+
+```java
+// From MCP result
+GridConfig gridConfig = result.gridConfig();
+
+// Create WorkerGrid with returned configuration
+WorkerGrid workerGrid = new WorkerGrid2D(size, size);
+workerGrid.setLocalWork(gridConfig.localWorkSize()[0], gridConfig.localWorkSize()[1], 1);
+
+// Use in TaskGraph
+GridScheduler gridScheduler = new GridScheduler("task.name", workerGrid);
+executionPlan.withGridScheduler(gridScheduler);
+```
+
+### Device Capabilities
+
+MCP now accepts actual device capabilities from OpenCL queries:
+
+| Parameter | Description |
+|-----------|-------------|
+| `max_work_group_size` | Maximum threads per work-group |
+| `max_work_item_sizes` | Max per dimension [x, y, z] |
+| `local_memory_size` | Local memory in bytes |
+| `compute_units` | Number of compute units / SMs |
+| `device_name` | Full device name string |
+| `simd_width` | SIMD/warp/wavefront width |
+
+This allows the LLM to make informed decisions about work-group sizes instead of using generic defaults.
 
 ### Bottleneck Classification
 

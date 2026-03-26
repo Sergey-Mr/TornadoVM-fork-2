@@ -5,7 +5,9 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LongSummaryStatistics;
+import java.util.Map;
 import java.util.Random;
 import java.util.Scanner;
 
@@ -14,6 +16,8 @@ import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
+import uk.ac.manchester.tornado.api.WorkerGrid;
+import uk.ac.manchester.tornado.api.WorkerGrid1D;
 import uk.ac.manchester.tornado.api.WorkerGrid2D;
 import uk.ac.manchester.tornado.api.common.Access;
 import uk.ac.manchester.tornado.api.common.TornadoDevice;
@@ -36,12 +40,15 @@ import uk.ac.manchester.tornado.api.TornadoProfilerResult;
 public class MatrixMul2DMCPBenchmark {
 
     private static final int DEFAULT_SIZE = 1024;
-    private static final int TS = 16; // Tile size for optimized kernel
+    private static final int TS = 16; // Default tile size
     private static final int WARM_UP_ITERATIONS = 50;
     private static final int BENCHMARK_ITERATIONS = 100;
     private static final String ENTRY_POINT = "matrixMultiplication";
     private static final String DEFAULT_MCP_URL = "http://localhost:8090/optimize";
     private static final Random RANDOM = new Random(42);
+
+    // Store MCP response for grid config extraction
+    private static String lastMcpResponse = null;
 
     public static void main(String[] args) throws Exception {
         if (args.length < 1) {
@@ -75,7 +82,7 @@ public class MatrixMul2DMCPBenchmark {
 
         // Benchmark original kernel
         System.out.println("--- Benchmarking Original Kernel ---");
-        double originalTimeMs = benchmarkKernel(originalKernel, matrixA, matrixB, matrixC, size, device, false);
+        double originalTimeMs = benchmarkKernel(originalKernel, matrixA, matrixB, matrixC, size, device, null);
         System.out.printf("Original kernel: %.3f ms%n", originalTimeMs);
         System.out.println();
 
@@ -94,9 +101,23 @@ public class MatrixMul2DMCPBenchmark {
         System.out.println("Optimized kernel saved to: " + optimizedPath);
         System.out.println();
 
+        // Parse grid config from MCP response
+        Map<String, Long> paramValues = new HashMap<>();
+        paramValues.put("size", (long) size);
+        GridConfigParser.GridConfig gridConfig = null;
+        if (lastMcpResponse != null) {
+            gridConfig = GridConfigParser.parseFromResponse(lastMcpResponse, paramValues);
+            if (gridConfig != null) {
+                System.out.println("Grid config from MCP: " + gridConfig);
+            } else {
+                System.out.println("No grid config in MCP response, using defaults");
+            }
+        }
+        System.out.println();
+
         // Benchmark optimized kernel
         System.out.println("--- Benchmarking Optimized Kernel ---");
-        double optimizedTimeMs = benchmarkKernel(optimizedKernel, matrixA, matrixB, matrixC, size, device, true);
+        double optimizedTimeMs = benchmarkKernel(optimizedKernel, matrixA, matrixB, matrixC, size, device, gridConfig);
         System.out.printf("Optimized kernel: %.3f ms%n", optimizedTimeMs);
         System.out.println();
 
@@ -122,7 +143,7 @@ public class MatrixMul2DMCPBenchmark {
 
     private static double benchmarkKernel(String kernelSource, FloatArray matrixA, FloatArray matrixB,
                                           FloatArray matrixC, int size, TornadoDevice device,
-                                          boolean isOptimized) throws Exception {
+                                          GridConfigParser.GridConfig gridConfig) throws Exception {
         // Write kernel to temp file
         File tempFile = File.createTempFile("kernel_", ".cl");
         tempFile.deleteOnExit();
@@ -142,11 +163,28 @@ public class MatrixMul2DMCPBenchmark {
 
         ImmutableTaskGraph snapshot = graph.snapshot();
 
-        // Configure grid - use TS x TS for optimized kernel, default for original
-        WorkerGrid2D worker = new WorkerGrid2D(size, size);
-        if (isOptimized && kernelSource.contains("reqd_work_group_size")) {
+        // Configure grid based on MCP response or defaults
+        WorkerGrid worker;
+        if (gridConfig != null && gridConfig.globalWorkSize != null && gridConfig.localWorkSize != null) {
+            // Use grid config from MCP
+            if (gridConfig.dimensions == 1) {
+                worker = new WorkerGrid1D(gridConfig.globalWorkSize[0]);
+                worker.setLocalWork(gridConfig.localWorkSize[0], 1, 1);
+                System.out.println("Using MCP grid: " + gridConfig.globalWorkSize[0] + " global, " + gridConfig.localWorkSize[0] + " local (1D)");
+            } else {
+                worker = new WorkerGrid2D(gridConfig.globalWorkSize[0], gridConfig.globalWorkSize[1]);
+                worker.setLocalWork(gridConfig.localWorkSize[0], gridConfig.localWorkSize[1], 1);
+                System.out.println("Using MCP grid: " + gridConfig.globalWorkSize[0] + "x" + gridConfig.globalWorkSize[1] + " global, " + gridConfig.localWorkSize[0] + "x" + gridConfig.localWorkSize[1] + " local (2D)");
+            }
+        } else if (kernelSource.contains("reqd_work_group_size")) {
+            // Fallback: extract from kernel attribute
+            worker = new WorkerGrid2D(size, size);
             worker.setLocalWork(TS, TS, 1);
-            System.out.println("Using optimized grid: " + size + "x" + size + " global, " + TS + "x" + TS + " local");
+            System.out.println("Using fallback grid: " + size + "x" + size + " global, " + TS + "x" + TS + " local");
+        } else {
+            // Default: let TornadoVM decide
+            worker = new WorkerGrid2D(size, size);
+            System.out.println("Using default grid: " + size + "x" + size + " global");
         }
         GridScheduler scheduler = new GridScheduler("s0.t0", worker);
 
@@ -215,6 +253,9 @@ public class MatrixMul2DMCPBenchmark {
         try (Scanner scanner = new Scanner(conn.getInputStream(), StandardCharsets.UTF_8)) {
             response = scanner.useDelimiter("\\A").hasNext() ? scanner.next() : "";
         }
+
+        // Store full response for grid config extraction
+        lastMcpResponse = response;
 
         // Extract optimized_kernel from JSON
         return extractOptimizedKernel(response);
