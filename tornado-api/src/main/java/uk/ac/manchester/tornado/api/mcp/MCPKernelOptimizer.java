@@ -23,6 +23,7 @@ public class MCPKernelOptimizer {
 
     private static final String DEFAULT_MCP_URL = "http://localhost:8090/optimize";
     private static final String TEST_MCP_URL = "http://localhost:8090/optimize-test";
+    private static final String EXPLAIN_ERROR_URL = "http://localhost:8090/explain-error";
     private static final int CONNECT_TIMEOUT = 10000;  // 10 seconds
     private static final int READ_TIMEOUT = 180000;    // 3 minutes for LLM
     private static final int MAX_ATTEMPTS = 3;         // Maximum optimization attempts
@@ -33,19 +34,61 @@ public class MCPKernelOptimizer {
 
     /**
      * Record for tracking a previous optimization attempt that failed or was slower.
+     * Includes optional error analysis fields from /explain-error endpoint.
      */
     public record PreviousAttempt(
             String optimizedKernel,
             double originalTimeMs,
             double optimizedTimeMs,
             int attemptNumber,
-            String validationError  // null if validation passed, error message if failed
+            String validationError,     // null if validation passed, error message if failed
+            String compilationError,    // Raw compilation/runtime error from TornadoVM
+            String errorExplanation,    // LLM-generated explanation (from /explain-error)
+            String errorLikelyCause,    // LLM-identified cause (from /explain-error)
+            String errorSuggestedFix    // LLM-suggested fix (from /explain-error)
     ) {
         // Constructor without validation error for backwards compatibility
         public PreviousAttempt(String optimizedKernel, double originalTimeMs, double optimizedTimeMs, int attemptNumber) {
-            this(optimizedKernel, originalTimeMs, optimizedTimeMs, attemptNumber, null);
+            this(optimizedKernel, originalTimeMs, optimizedTimeMs, attemptNumber, null, null, null, null, null);
+        }
+
+        // Constructor with validation error only (for performance-only failures)
+        public PreviousAttempt(String optimizedKernel, double originalTimeMs, double optimizedTimeMs, int attemptNumber, String validationError) {
+            this(optimizedKernel, originalTimeMs, optimizedTimeMs, attemptNumber, validationError, null, null, null, null);
+        }
+
+        // Constructor with compilation error and error analysis (for compilation failures)
+        public static PreviousAttempt withErrorAnalysis(
+                String optimizedKernel,
+                double originalTimeMs,
+                double optimizedTimeMs,
+                int attemptNumber,
+                String compilationError,
+                ErrorAnalysis errorAnalysis) {
+            return new PreviousAttempt(
+                    optimizedKernel,
+                    originalTimeMs,
+                    optimizedTimeMs,
+                    attemptNumber,
+                    null,  // No validation error for compilation failures
+                    compilationError,
+                    errorAnalysis != null ? errorAnalysis.explanation() : null,
+                    errorAnalysis != null ? errorAnalysis.likelyCause() : null,
+                    errorAnalysis != null ? errorAnalysis.suggestedFix() : null
+            );
         }
     }
+
+    /**
+     * Result from /explain-error endpoint.
+     * Contains LLM analysis of compilation/runtime errors.
+     */
+    public record ErrorAnalysis(
+            String explanation,    // Clear explanation of what the error means
+            String likelyCause,    // Specific cause in the kernel code
+            String suggestedFix,   // Concrete fix to apply
+            String rawResponse     // Full LLM response (for debugging)
+    ) {}
 
     /**
      * Grid configuration for launching the optimized kernel.
@@ -101,10 +144,25 @@ public class MCPKernelOptimizer {
      */
     public record BenchmarkResult(
             double timeMs,           // Execution time in milliseconds (Double.MAX_VALUE if failed)
-            String validationError   // null if validation passed, error message if failed
+            String validationError,  // null if validation passed, error message if failed
+            String compilationError  // null if compilation succeeded, error message if failed
     ) {
+        // Constructor for successful benchmark (backwards compatibility)
+        public BenchmarkResult(double timeMs, String validationError) {
+            this(timeMs, validationError, null);
+        }
+
         public boolean isValid() {
-            return validationError == null && timeMs < Double.MAX_VALUE;
+            return validationError == null && compilationError == null && timeMs < Double.MAX_VALUE;
+        }
+
+        public boolean hasCompilationError() {
+            return compilationError != null;
+        }
+
+        // Factory method for compilation failure
+        public static BenchmarkResult compilationFailed(String errorMessage) {
+            return new BenchmarkResult(Double.MAX_VALUE, null, errorMessage);
         }
     }
 
@@ -261,8 +319,32 @@ public class MCPKernelOptimizer {
                 BenchmarkResult benchmarkResult = benchmarkFunc.apply(optimized, gridConfig);
                 double optimizedTimeMs = benchmarkResult.timeMs();
                 String validationError = benchmarkResult.validationError();
+                String compilationError = benchmarkResult.compilationError();
 
-                // Check for validation failure first
+                // Check for compilation failure first
+                if (benchmarkResult.hasCompilationError()) {
+                    System.out.printf("[MCP] ✗ Attempt %d COMPILATION FAILED: %s%n", attempt,
+                            compilationError.substring(0, Math.min(200, compilationError.length())));
+
+                    // Call /explain-error to get LLM analysis of the compilation error
+                    ErrorAnalysis errorAnalysis = explainError(compilationError, optimized, backend);
+
+                    // Track this failed attempt with error analysis for feedback
+                    previousAttempts.add(PreviousAttempt.withErrorAnalysis(
+                            optimized,
+                            originalTimeMs,
+                            optimizedTimeMs,
+                            attempt,
+                            compilationError,
+                            errorAnalysis
+                    ));
+                    if (attempt < maxAttempts) {
+                        System.out.println("[MCP] Retrying with compilation error analysis feedback...");
+                    }
+                    continue;  // Skip to next attempt
+                }
+
+                // Check for validation failure
                 if (validationError != null) {
                     System.out.printf("[MCP] ✗ Attempt %d VALIDATION FAILED: %s%n", attempt, validationError);
                     // Track this failed attempt with validation error for feedback
@@ -434,6 +516,19 @@ public class MCPKernelOptimizer {
                 if (attempt.validationError() != null) {
                     json.append(", \"validation_error\": ").append(escapeJson(attempt.validationError()));
                 }
+                // Include compilation error and error analysis if present
+                if (attempt.compilationError() != null) {
+                    json.append(", \"compilation_error\": ").append(escapeJson(attempt.compilationError()));
+                }
+                if (attempt.errorExplanation() != null) {
+                    json.append(", \"error_explanation\": ").append(escapeJson(attempt.errorExplanation()));
+                }
+                if (attempt.errorLikelyCause() != null) {
+                    json.append(", \"error_likely_cause\": ").append(escapeJson(attempt.errorLikelyCause()));
+                }
+                if (attempt.errorSuggestedFix() != null) {
+                    json.append(", \"error_suggested_fix\": ").append(escapeJson(attempt.errorSuggestedFix()));
+                }
                 json.append("}");
             }
             json.append("]");
@@ -470,6 +565,82 @@ public class MCPKernelOptimizer {
      * Internal result from MCP server containing kernel and grid config.
      */
     private record MCPResponse(String kernel, GridConfig gridConfig) {}
+
+    /**
+     * Call /explain-error endpoint to analyze a compilation/runtime error.
+     *
+     * @param errorMessage   The raw error message from TornadoVM/OpenCL/CUDA
+     * @param kernelCode     The kernel that caused the error
+     * @param backend        "opencl" or "ptx"
+     * @return ErrorAnalysis with LLM-generated explanation, or null if call failed
+     */
+    public ErrorAnalysis explainError(String errorMessage, String kernelCode, String backend) {
+        if (errorMessage == null || errorMessage.isEmpty()) {
+            return null;
+        }
+
+        try {
+            System.out.println("[MCP] Calling /explain-error to analyze compilation error...");
+
+            URL url = new URL(EXPLAIN_ERROR_URL);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(CONNECT_TIMEOUT);
+            conn.setReadTimeout(READ_TIMEOUT);
+
+            // Build JSON request
+            StringBuilder json = new StringBuilder();
+            json.append("{");
+            json.append("\"error_message\": ").append(escapeJson(errorMessage)).append(", ");
+            json.append("\"kernel_code\": ").append(escapeJson(kernelCode)).append(", ");
+            json.append("\"backend\": \"").append(backend).append("\", ");
+            json.append("\"device_family\": \"").append(deviceFamily).append("\"");
+            json.append("}");
+
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(json.toString().getBytes(StandardCharsets.UTF_8));
+            }
+
+            int responseCode = conn.getResponseCode();
+            if (responseCode != 200) {
+                String error = "";
+                if (conn.getErrorStream() != null) {
+                    try (Scanner scanner = new Scanner(conn.getErrorStream(), StandardCharsets.UTF_8)) {
+                        error = scanner.useDelimiter("\\A").hasNext() ? scanner.next() : "";
+                    }
+                }
+                System.err.println("[MCP] /explain-error failed: HTTP " + responseCode + ": " + error);
+                return null;
+            }
+
+            // Read response
+            String response;
+            try (Scanner scanner = new Scanner(conn.getInputStream(), StandardCharsets.UTF_8)) {
+                response = scanner.useDelimiter("\\A").hasNext() ? scanner.next() : "";
+            }
+
+            // Extract fields from JSON response
+            String explanation = extractJsonString(response, "explanation");
+            String likelyCause = extractJsonString(response, "likely_cause");
+            String suggestedFix = extractJsonString(response, "suggested_fix");
+            String rawResponse = extractJsonString(response, "raw_response");
+
+            if (explanation != null) {
+                System.out.println("[MCP] Error analysis received:");
+                System.out.println("[MCP]   Explanation: " + explanation.substring(0, Math.min(100, explanation.length())) + "...");
+                System.out.println("[MCP]   Likely cause: " + (likelyCause != null ? likelyCause.substring(0, Math.min(80, likelyCause.length())) : "N/A"));
+                return new ErrorAnalysis(explanation, likelyCause, suggestedFix, rawResponse);
+            }
+
+            return null;
+
+        } catch (IOException e) {
+            System.err.println("[MCP] /explain-error failed: " + e.getMessage());
+            return null;
+        }
+    }
 
     /**
      * Extract optimized_kernel and grid_config from JSON response.
