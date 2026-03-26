@@ -168,12 +168,12 @@ public class MatrixMul2DMCPBenchmark {
         if (gridConfig != null && gridConfig.globalWorkSize != null && gridConfig.localWorkSize != null) {
             // Use grid config from MCP
             if (gridConfig.dimensions == 1) {
-                worker = new WorkerGrid1D(gridConfig.globalWorkSize[0]);
-                worker.setLocalWork(gridConfig.localWorkSize[0], 1, 1);
+                worker = new WorkerGrid1D((int) gridConfig.globalWorkSize[0]);
+                worker.setLocalWork((int) gridConfig.localWorkSize[0], 1, 1);
                 System.out.println("Using MCP grid: " + gridConfig.globalWorkSize[0] + " global, " + gridConfig.localWorkSize[0] + " local (1D)");
             } else {
-                worker = new WorkerGrid2D(gridConfig.globalWorkSize[0], gridConfig.globalWorkSize[1]);
-                worker.setLocalWork(gridConfig.localWorkSize[0], gridConfig.localWorkSize[1], 1);
+                worker = new WorkerGrid2D((int) gridConfig.globalWorkSize[0], (int) gridConfig.globalWorkSize[1]);
+                worker.setLocalWork((int) gridConfig.localWorkSize[0], (int) gridConfig.localWorkSize[1], 1);
                 System.out.println("Using MCP grid: " + gridConfig.globalWorkSize[0] + "x" + gridConfig.globalWorkSize[1] + " global, " + gridConfig.localWorkSize[0] + "x" + gridConfig.localWorkSize[1] + " local (2D)");
             }
         } else if (kernelSource.contains("reqd_work_group_size")) {
