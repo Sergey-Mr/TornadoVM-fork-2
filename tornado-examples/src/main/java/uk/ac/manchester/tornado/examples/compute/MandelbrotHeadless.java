@@ -59,10 +59,19 @@ public class MandelbrotHeadless {
 
         ImmutableTaskGraph immutableTaskGraph = taskGraph.snapshot();
         TornadoExecutionPlan executor = new TornadoExecutionPlan(immutableTaskGraph);
-        executor.execute();
+
+        // Run multiple iterations to trigger MCP optimization (needs 10+ runs)
+        int iterations = 20;
+        long start = System.nanoTime();
+        for (int i = 0; i < iterations; i++) {
+            executor.execute();
+        }
+        long end = System.nanoTime();
+        long avgTime = (end - start) / iterations;
 
         // Verify a few values
         System.out.println("Mandelbrot computation complete");
+        System.out.println("Average time per iteration: " + (avgTime / 1_000_000.0) + " ms");
         System.out.println("Sample values: [0]=" + result.get(0) + ", [512*512]=" + result.get(512*512));
     }
 }
