@@ -52,7 +52,6 @@ public class MatrixMul2DLocalMemoryPTXBenchmark {
     private static final int WARM_UP_ITERATIONS = 50;
     private static final int BENCHMARK_ITERATIONS = 100;
 
-    // TODO: Update this after generating PTX kernel
     private static final String ENTRY_POINT = "matrixMultiplication";
 
     private static final Random RANDOM = new Random(42);

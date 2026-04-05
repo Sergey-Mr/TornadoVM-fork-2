@@ -25,7 +25,7 @@ public class MCPKernelOptimizer {
     private static final String TEST_MCP_URL = "http://localhost:8090/optimize-test";
     private static final String EXPLAIN_ERROR_URL = "http://localhost:8090/explain-error";
     private static final int CONNECT_TIMEOUT = 10000;  // 10 seconds
-    private static final int READ_TIMEOUT = 180000;    // 3 minutes for LLM
+    private static final int READ_TIMEOUT = 600000;   // 10 minutes for LLM (chain-of-thought takes time)
     private static final int MAX_ATTEMPTS = 3;         // Maximum optimization attempts
 
     private final String mcpServerUrl;

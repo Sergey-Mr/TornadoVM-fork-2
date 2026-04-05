@@ -49,7 +49,6 @@ public class BFSPTXBenchmark {
     private static final int BENCHMARK_ITERATIONS = 20;
     private static final int MAX_BFS_LEVELS = 100;
 
-    // TODO: Update this after generating PTX kernel
     private static final String ENTRY_POINT = "runBFS";
 
     private static final Random RANDOM = new Random(42);

@@ -50,7 +50,6 @@ public class FlashAttentionPTXBenchmark {
     private static final int WARM_UP_ITERATIONS = 20;
     private static final int BENCHMARK_ITERATIONS = 50;
 
-    // TODO: Update this after generating PTX kernel
     private static final String ENTRY_POINT = "processHeadsFlashAttention";
 
     private static final Random RANDOM = new Random(42);
