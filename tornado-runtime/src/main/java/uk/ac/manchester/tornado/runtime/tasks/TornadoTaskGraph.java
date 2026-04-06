@@ -1989,6 +1989,7 @@ public class TornadoTaskGraph implements TornadoTaskGraphInterface {
 
         // Get the kernel source from the code cache
         TornadoDeviceContext deviceContext = task.getDevice().getDeviceContext();
+        System.out.println("[MCP DEBUG] Requesting kernel for taskId: " + task.getId() + ", entryPoint: " + entryPoint);
         return deviceContext.getKernelSource(executionPlanId, task.getId(), entryPoint);
     }
 

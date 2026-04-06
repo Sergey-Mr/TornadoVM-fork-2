@@ -84,10 +84,15 @@ public class PTXCodeCache {
      * @return The kernel source code as a string, or null if not found
      */
     public String getKernelSource(String name) {
+        System.out.println("[MCP DEBUG] Looking for kernel with name: " + name);
+        System.out.println("[MCP DEBUG] Cache keys: " + cache.keySet());
         PTXInstalledCode installedCode = cache.get(name);
         if (installedCode != null) {
-            return installedCode.getGeneratedSourceCode();
+            String source = installedCode.getGeneratedSourceCode();
+            System.out.println("[MCP DEBUG] Found kernel, source length: " + (source != null ? source.length() : 0));
+            return source;
         }
+        System.out.println("[MCP DEBUG] Kernel not found in cache");
         return null;
     }
 
