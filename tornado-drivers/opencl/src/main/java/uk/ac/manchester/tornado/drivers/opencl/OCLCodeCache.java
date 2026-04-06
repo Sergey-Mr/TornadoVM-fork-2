@@ -749,10 +749,30 @@ public class OCLCodeCache {
      * @return The kernel source code as a string, or null if not found
      */
     public String getKernelSource(String id, String entryPoint) {
+        // Try exact match first
         OCLInstalledCode installedCode = cache.get(id + "-" + entryPoint);
         if (installedCode != null) {
             return installedCode.getGeneratedSourceCode();
         }
+
+        // Try prefix matching - the cache key format is like:
+        // s0_t0_matrixmultiplication_arrays_floatarray_...
+        // But we're given id="s0.t0" and entryPoint="matrixMultiplication"
+        String normalizedId = id.replace(".", "_");
+        String normalizedEntry = entryPoint.toLowerCase();
+        String prefix = normalizedId + "_" + normalizedEntry;
+
+        System.out.println("[MCP DEBUG] OCL Looking for prefix: " + prefix);
+        System.out.println("[MCP DEBUG] OCL Cache keys: " + cache.keySet());
+
+        for (String key : cache.keySet()) {
+            if (key.startsWith(prefix)) {
+                System.out.println("[MCP DEBUG] OCL Found matching key: " + key);
+                return cache.get(key).getGeneratedSourceCode();
+            }
+        }
+
+        System.out.println("[MCP DEBUG] OCL No matching key found");
         return null;
     }
 
