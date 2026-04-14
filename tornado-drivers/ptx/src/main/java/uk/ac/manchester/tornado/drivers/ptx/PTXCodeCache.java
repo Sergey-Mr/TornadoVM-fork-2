@@ -86,12 +86,28 @@ public class PTXCodeCache {
     public String getKernelSource(String name) {
         System.out.println("[MCP DEBUG] Looking for kernel with name: " + name);
         System.out.println("[MCP DEBUG] Cache keys: " + cache.keySet());
+
+        // Try exact match first
         PTXInstalledCode installedCode = cache.get(name);
         if (installedCode != null) {
             String source = installedCode.getGeneratedSourceCode();
-            System.out.println("[MCP DEBUG] Found kernel, source length: " + (source != null ? source.length() : 0));
+            System.out.println("[MCP DEBUG] Found kernel (exact match), source length: " + (source != null ? source.length() : 0));
             return source;
         }
+
+        // PTX cache uses fully mangled names (e.g., "s0_t0_matrixmultiplication_arrays_floatarray_...")
+        // but the lookup uses the simple task ID (e.g., "s0.t0").
+        // Fall back to prefix matching: sanitize the task ID (dots → underscores) and find a key that starts with it.
+        String sanitized = name.replace(".", "_").toLowerCase();
+        for (var entry : cache.entrySet()) {
+            if (entry.getKey().startsWith(sanitized)) {
+                String source = entry.getValue().getGeneratedSourceCode();
+                System.out.println("[MCP DEBUG] Found kernel (prefix match on '" + sanitized + "'), key: " + entry.getKey()
+                        + ", source length: " + (source != null ? source.length() : 0));
+                return source;
+            }
+        }
+
         System.out.println("[MCP DEBUG] Kernel not found in cache");
         return null;
     }
@@ -107,6 +123,20 @@ public class PTXCodeCache {
         if (installedCode != null) {
             installedCode.invalidate();
             cache.remove(name);
+            return;
+        }
+        // Prefix match fallback (same as getKernelSource)
+        String sanitized = name.replace(".", "_").toLowerCase();
+        String matchedKey = null;
+        for (var entry : cache.entrySet()) {
+            if (entry.getKey().startsWith(sanitized)) {
+                matchedKey = entry.getKey();
+                break;
+            }
+        }
+        if (matchedKey != null) {
+            cache.get(matchedKey).invalidate();
+            cache.remove(matchedKey);
         }
     }
 
@@ -121,11 +151,23 @@ public class PTXCodeCache {
      * @return The new installed code, or null if installation failed
      */
     public PTXInstalledCode replaceKernelSource(String name, String resolvedMethodName, String newSource, boolean debugKernel) {
-        // First invalidate the existing kernel
-        invalidateKernel(name);
+        // Resolve the actual cache key (may be mangled)
+        String actualKey = name;
+        if (!cache.containsKey(name)) {
+            String sanitized = name.replace(".", "_").toLowerCase();
+            for (String key : cache.keySet()) {
+                if (key.startsWith(sanitized)) {
+                    actualKey = key;
+                    break;
+                }
+            }
+        }
 
-        // Install the new source
+        // Invalidate the existing kernel
+        invalidateKernel(actualKey);
+
+        // Install the new source under the resolved key
         byte[] sourceBytes = newSource.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        return installSource(name, sourceBytes, resolvedMethodName, debugKernel);
+        return installSource(actualKey, sourceBytes, resolvedMethodName, debugKernel);
     }
 }

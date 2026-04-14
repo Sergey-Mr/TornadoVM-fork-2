@@ -526,14 +526,25 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
 
         int dataParams = inputs.size() + outputs.size();
 
-        // Check if kernel has scalar size parameter(s)
-        boolean hasScalarParams = userParams > dataParams;
-        int scalarCount = hasScalarParams ? (userParams - dataParams) : 0;
+        // Count scalar params directly from signature (don't derive from data objects).
+        // This handles kernels where inputs/outputs lists contain duplicates or shared objects
+        // (e.g., BFS has 'vertices' in both inputs and outputs).
+        int scalarCount = 0;
+        {
+            String[] sigParams = kernelSig.split(",");
+            for (int i = 4; i < sigParams.length; i++) {
+                if (sigParams[i].contains("__private")) {
+                    scalarCount++;
+                }
+            }
+        }
 
         System.out.printf("[MCP] Kernel has %d total params, %d user params, %d data objects, %d scalar params%n",
                 totalKernelParams, userParams, dataParams, scalarCount);
 
-        int numParams = dataParams + scalarCount;
+        // Size array to match the kernel signature - this is the source of truth for the kernel.
+        // The fallback loop below will only fill slots if there's room (bounds-checked).
+        int numParams = userParams;
         AccessorParameters accessors = new AccessorParameters(numParams);
 
         // CRITICAL: Parameters must be added in the EXACT order the kernel expects them.
@@ -587,12 +598,24 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
             }
         }
 
-        // Add any remaining unmatched objects as fallback
+        // Add any remaining unmatched objects as fallback (bounds-checked).
+        // The kernel only accepts `numParams` arguments; extra data objects in the task graph
+        // (e.g., duplicates when same array is both input and output) are skipped.
         for (Object input : remainingInputs) {
+            if (paramIndex >= numParams) {
+                System.out.printf("[MCP] Skipping extra input %s (kernel only takes %d params)%n",
+                        input.getClass().getSimpleName(), numParams);
+                continue;
+            }
             accessors.set(paramIndex++, input, Access.READ_ONLY);
             System.out.printf("[MCP] Fallback: added remaining input %s%n", input.getClass().getSimpleName());
         }
         for (Object output : remainingOutputs) {
+            if (paramIndex >= numParams) {
+                System.out.printf("[MCP] Skipping extra output %s (kernel only takes %d params)%n",
+                        output.getClass().getSimpleName(), numParams);
+                continue;
+            }
             accessors.set(paramIndex++, output, Access.WRITE_ONLY);
             System.out.printf("[MCP] Fallback: added remaining output %s%n", output.getClass().getSimpleName());
         }
@@ -773,6 +796,43 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
                 float[] copy = new float[size];
                 for (int i = 0; i < size; i++) {
                     copy[i] = (float) (double) get.invoke(output, i);
+                }
+                return copy;
+            }
+
+            // Handle IntArray / LongArray / ShortArray (convert to float for comparison).
+            // Integer outputs (e.g. BFS vertex distances) compare exactly — tolerance doesn't apply
+            // in practice because int values don't drift, but the float representation is fine
+            // for values within 2^24 (which covers typical graph/problem sizes).
+            if (className.contains("IntArray") || className.contains("LongArray") || className.contains("ShortArray")) {
+                java.lang.reflect.Method getSize = output.getClass().getMethod("getSize");
+                int size = (int) getSize.invoke(output);
+                java.lang.reflect.Method get = output.getClass().getMethod("get", int.class);
+
+                float[] copy = new float[size];
+                for (int i = 0; i < size; i++) {
+                    Object val = get.invoke(output, i);
+                    copy[i] = ((Number) val).floatValue();
+                }
+                return copy;
+            }
+
+            // Handle primitive int[]
+            if (output instanceof int[]) {
+                int[] src = (int[]) output;
+                float[] copy = new float[src.length];
+                for (int i = 0; i < src.length; i++) {
+                    copy[i] = (float) src[i];
+                }
+                return copy;
+            }
+
+            // Handle primitive long[]
+            if (output instanceof long[]) {
+                long[] src = (long[]) output;
+                float[] copy = new float[src.length];
+                for (int i = 0; i < src.length; i++) {
+                    copy[i] = (float) src[i];
                 }
                 return copy;
             }
@@ -1070,9 +1130,14 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
             return arraySize;
         }
 
-        // 'size' for square matrices
+        // 'size' — same disambiguation as resolveScalarParameter: matrixDim for
+        // 2D square matrices (input is a perfect square), arraySize for 1D.
         if (paramName.equals("size")) {
-            return matrixDim;
+            boolean isPerfectSquare = (matrixDim * matrixDim == arraySize);
+            int resolved = isPerfectSquare ? matrixDim : arraySize;
+            System.out.printf("[MCP] Resolving 'size' to %d (%s)%n",
+                    resolved, isPerfectSquare ? "matrixDim, 2D" : "arraySize, 1D");
+            return resolved;
         }
 
         // Try to get dimensions from Matrix2DFloat if available
@@ -1279,9 +1344,18 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
             return outputArraySize;
         }
 
-        // 'size' for square matrices
+        // 'size' is ambiguous — it means matrix dimension for 2D matrix kernels
+        // (input is NxN so matrixDim = sqrt(inputArraySize)), but total length for
+        // 1D kernels like reduction (input is a flat N-element array).
+        // Disambiguate by checking whether the input array is a perfect square:
+        //   - Perfect square → 2D matrix kernel → use matrixDim
+        //   - Not a perfect square → 1D kernel → use inputArraySize
         if (name.equals("size")) {
-            return matrixDim;
+            boolean isPerfectSquare = (matrixDim * matrixDim == inputArraySize);
+            int resolved = isPerfectSquare ? matrixDim : inputArraySize;
+            System.out.printf("[MCP] resolveScalarParameter: 'size' -> %d (%s, inputArraySize=%d, matrixDim=%d)%n",
+                    resolved, isPerfectSquare ? "2D square matrix" : "1D array", inputArraySize, matrixDim);
+            return resolved;
         }
 
         // 'localWorkGroupSize' - return the local work size
