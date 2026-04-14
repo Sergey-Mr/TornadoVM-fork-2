@@ -45,8 +45,9 @@ public class MatrixVectorRowMajorPTXBenchmark {
     private static final int WARM_UP_ITERATIONS = 100;
     private static final int BENCHMARK_ITERATIONS = 200;
 
-    // Entry point must be lowercase to match generated PTX naming convention
-    private static final String ENTRY_POINT = "matrixVectorGeneric";
+    // Entry point must match the FULL mangled name from TornadoVM's PTX generation.
+    // Use --printKernel to find the exact name. The PTX file must also use this same name.
+    private static final String ENTRY_POINT = "s1_t0_matrixvectorparallel_arrays_floatarray_arrays_floatarray_arrays_floatarray_32768_8192";
 
     private static final Random RANDOM = new Random(42);
 
