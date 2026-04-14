@@ -220,10 +220,9 @@ public class PTXTornadoDevice implements TornadoXPUDevice {
         try {
             byte[] source = Files.readAllBytes(path);
             source = PTXCodeUtil.getCodeWithAttachedPTXHeader(source, getBackend());
-            // For prebuiltTask: swap name/resolvedMethodName so that
-            // cuModuleGetFunction (which uses the 'name' param = kernelFunctionName
-            // in PTXModule) looks for the entry point name that's actually in the PTX.
-            return deviceContext.installCode(executionPlanId, entryPoint, source, cacheKey, task.meta().isPrintKernelEnabled());
+            // For prebuiltTask: use entryPoint as both cache key and function name
+            // so cuModuleGetFunction finds the actual function name in the PTX.
+            return deviceContext.installCode(executionPlanId, entryPoint, source, entryPoint, task.meta().isPrintKernelEnabled());
         } catch (IOException e) {
             e.printStackTrace();
         }
