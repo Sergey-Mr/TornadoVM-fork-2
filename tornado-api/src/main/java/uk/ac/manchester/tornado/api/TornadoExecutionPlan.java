@@ -527,50 +527,58 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         System.out.printf("[MCP] Resolved global work size: %s%n", java.util.Arrays.toString(globalSizes));
 
         // 5. Create AccessorParameters based on actual kernel signature
-        // Count user parameters (total params - 4 TornadoVM internal params)
         String kernelSig = extractKernelSignature(optimizedKernel);
         if (kernelSig == null) {
-            // PTX kernels with non-standard signatures or unparseable formats —
-            // fall through to replaceKernel fallback path
             throw new RuntimeException("Could not extract kernel signature (PTX kernels may need replaceKernel path)");
         }
         int totalKernelParams = countParameters(kernelSig);
-        int userParams = totalKernelParams - 4;  // Subtract 4 TornadoVM params
+
+        // Determine number of TornadoVM internal params based on backend:
+        // OpenCL: 4 internal params (kernel_context, constant_region, local_region, atomics)
+        // PTX:    1 internal param  (kernel_context only)
+        String mcpBackend = System.getProperty("tornado.mcp.backend", "opencl");
+        int internalParams = mcpBackend.equalsIgnoreCase("ptx") ? 1 : 4;
+        int userParams = totalKernelParams - internalParams;
 
         int dataParams = inputs.size() + outputs.size();
 
-        // Count scalar params directly from signature (don't derive from data objects).
-        // This handles kernels where inputs/outputs lists contain duplicates or shared objects
-        // (e.g., BFS has 'vertices' in both inputs and outputs).
+        // Count scalar params directly from signature.
+        // For OpenCL: scalars have "__private"
+        // For PTX: scalars have ".param .align" but NOT ".ptr .global"
         int scalarCount = 0;
         {
             String[] sigParams = kernelSig.split(",");
-            for (int i = 4; i < sigParams.length; i++) {
-                if (sigParams[i].contains("__private")) {
-                    scalarCount++;
+            for (int i = internalParams; i < sigParams.length; i++) {
+                String p = sigParams[i].trim();
+                if (mcpBackend.equalsIgnoreCase("ptx")) {
+                    // PTX: array params have ".ptr .global", scalars don't
+                    if (!p.contains(".ptr") && !p.contains(".global")) {
+                        scalarCount++;
+                    }
+                } else {
+                    // OpenCL: scalars have "__private"
+                    if (p.contains("__private")) {
+                        scalarCount++;
+                    }
                 }
             }
         }
 
-        System.out.printf("[MCP] Kernel has %d total params, %d user params, %d data objects, %d scalar params%n",
-                totalKernelParams, userParams, dataParams, scalarCount);
+        System.out.printf("[MCP] Kernel has %d total params, %d user params (%d internal), %d data objects, %d scalar params%n",
+                totalKernelParams, userParams, internalParams, dataParams, scalarCount);
 
         // Size array to match the kernel signature - this is the source of truth for the kernel.
-        // The fallback loop below will only fill slots if there's room (bounds-checked).
         int numParams = userParams;
         AccessorParameters accessors = new AccessorParameters(numParams);
 
         // CRITICAL: Parameters must be added in the EXACT order the kernel expects them.
-        // For NBody, params are interleaved: numBodies(scalar), refPos(array), refVel(array), delT(scalar), espSqr(scalar)
-        // We process ALL user params in signature order, checking type for each.
-
         List<Object> remainingInputs = new ArrayList<>(inputs);
         List<Object> remainingOutputs = new ArrayList<>(outputs);
 
         // Get all user parameters from signature in order
         String[] allParams = kernelSig.split(",");
         int paramIndex = 0;
-        int startIdx = 4;  // Skip 4 TornadoVM internal params
+        int startIdx = internalParams;  // Skip internal params (1 for PTX, 4 for OpenCL)
 
         System.out.printf("[MCP] Processing %d user params from signature (after %d internal)%n",
                 allParams.length - startIdx, startIdx);
@@ -580,7 +588,11 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
             String[] words = param.split("\\s+");
             String paramName = words.length > 0 ? words[words.length - 1].replaceAll("[*\\[\\]]", "") : "";
 
-            if (param.contains("__global") && param.contains("uchar")) {
+            // Detect array params: OpenCL uses "__global uchar", PTX uses ".ptr .global"
+            boolean isArrayParam = (param.contains("__global") && param.contains("uchar"))
+                    || (param.contains(".ptr") && param.contains(".global"));
+
+            if (isArrayParam) {
                 // This is a data array parameter
                 Object matched = matchParameterToDataObject(paramName, remainingInputs, remainingOutputs);
                 if (matched != null) {
@@ -594,9 +606,11 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
                 } else {
                     System.err.printf("[MCP] WARNING: Could not match array param '%s' to any data object%n", paramName);
                 }
-            } else if (param.contains("__private")) {
-                // This is a scalar parameter - determine if int or float
-                boolean isFloat = param.contains("float");
+            } else if (param.contains("__private") || (!isArrayParam && param.contains(".param"))) {
+                // Scalar parameter:
+                // OpenCL: "__private int size" or "__private float delT"
+                // PTX: ".param .align 8 .u64 numBodies" or ".param .align 8 .u64 delT"
+                boolean isFloat = param.contains("float") || param.contains(".f32") || param.contains(".f64");
                 if (isFloat) {
                     float floatValue = resolveFloatParameter(paramName, inputs, outputs);
                     accessors.set(paramIndex++, Float.valueOf(floatValue), Access.NONE);
