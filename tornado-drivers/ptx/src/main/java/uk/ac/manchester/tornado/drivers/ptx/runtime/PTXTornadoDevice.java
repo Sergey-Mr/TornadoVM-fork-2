@@ -206,9 +206,13 @@ public class PTXTornadoDevice implements TornadoXPUDevice {
     private TornadoInstalledCode compilePreBuiltTask(long executionPlanId, SchedulableTask task) {
         final PTXDeviceContext deviceContext = getDeviceContext();
         final PrebuiltTask executable = (PrebuiltTask) task;
-        String functionName = PTXCodeUtil.buildKernelName(executable.getEntryPoint(), executable);
-        if (deviceContext.isCached(executionPlanId, executable.getEntryPoint(), executable)) {
-            return deviceContext.getInstalledCode(executionPlanId, functionName);
+        // For prebuiltTask, use the entry point name directly as the function name.
+        // Do NOT mangle it with buildKernelName — the PTX file contains the function
+        // with the entry point name as-is (e.g., "matrixVectorGeneric" or the full
+        // TornadoVM mangled name). cuModuleGetFunction must match exactly.
+        String entryPoint = executable.getEntryPoint();
+        if (deviceContext.isCached(executionPlanId, entryPoint, executable)) {
+            return deviceContext.getInstalledCode(executionPlanId, entryPoint);
         }
 
         final Path path = Paths.get(executable.getFilename());
@@ -216,7 +220,10 @@ public class PTXTornadoDevice implements TornadoXPUDevice {
         try {
             byte[] source = Files.readAllBytes(path);
             source = PTXCodeUtil.getCodeWithAttachedPTXHeader(source, getBackend());
-            return deviceContext.installCode(executionPlanId, functionName, source, executable.getEntryPoint(), task.meta().isPrintKernelEnabled());
+            // For prebuiltTask: swap name/resolvedMethodName so that
+            // cuModuleGetFunction (which uses the 'name' param = kernelFunctionName
+            // in PTXModule) looks for the entry point name that's actually in the PTX.
+            return deviceContext.installCode(executionPlanId, entryPoint, source, cacheKey, task.meta().isPrintKernelEnabled());
         } catch (IOException e) {
             e.printStackTrace();
         }
