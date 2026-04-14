@@ -403,6 +403,8 @@ public class MCPKernelOptimizer {
 
             } catch (IOException e) {
                 System.err.println("[MCP] Attempt " + attempt + " failed: " + e.getMessage());
+            } catch (Exception e) {
+                System.err.println("[MCP] Attempt " + attempt + " failed (runtime): " + e.getMessage());
             }
         }
 

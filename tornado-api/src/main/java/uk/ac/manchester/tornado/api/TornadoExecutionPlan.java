@@ -460,12 +460,20 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
      * Extract the kernel function signature (parameters) from kernel source.
      */
     private String extractKernelSignature(String kernelSource) {
-        // Match __kernel void funcName(params)
-        Pattern pattern = Pattern.compile("__kernel\\s+void\\s+\\w+\\s*\\(([^)]+)\\)");
-        Matcher matcher = pattern.matcher(kernelSource);
-        if (matcher.find()) {
-            return matcher.group(1).trim();
+        // OpenCL: __kernel void funcName(params)
+        Pattern oclPattern = Pattern.compile("__kernel\\s+void\\s+\\w+\\s*\\(([^)]+)\\)");
+        Matcher oclMatcher = oclPattern.matcher(kernelSource);
+        if (oclMatcher.find()) {
+            return oclMatcher.group(1).trim();
         }
+
+        // PTX: .visible .entry funcName(params) — params may span multiple lines
+        Pattern ptxPattern = Pattern.compile("\\.visible\\s+\\.entry\\s+\\w+\\s*\\(([^)]+)\\)", Pattern.DOTALL);
+        Matcher ptxMatcher = ptxPattern.matcher(kernelSource);
+        if (ptxMatcher.find()) {
+            return ptxMatcher.group(1).trim();
+        }
+
         return null;
     }
 
@@ -521,6 +529,11 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         // 5. Create AccessorParameters based on actual kernel signature
         // Count user parameters (total params - 4 TornadoVM internal params)
         String kernelSig = extractKernelSignature(optimizedKernel);
+        if (kernelSig == null) {
+            // PTX kernels with non-standard signatures or unparseable formats —
+            // fall through to replaceKernel fallback path
+            throw new RuntimeException("Could not extract kernel signature (PTX kernels may need replaceKernel path)");
+        }
         int totalKernelParams = countParameters(kernelSig);
         int userParams = totalKernelParams - 4;  // Subtract 4 TornadoVM params
 
