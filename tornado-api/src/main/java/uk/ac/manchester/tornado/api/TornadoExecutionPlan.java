@@ -697,7 +697,8 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
 
     /**
      * Fallback benchmark using replaceKernelSource approach.
-     * Less accurate for optimized kernels but works when prebuiltTask fails.
+     * Used when prebuiltTask fails (e.g., PTX kernels with header issues).
+     * Includes output validation against stored original outputs.
      */
     private double benchmarkWithReplaceKernel(String optimizedKernel, String taskId) {
         boolean replaced = replaceKernelSource(taskId, optimizedKernel);
@@ -724,6 +725,27 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
 
         long optimizedSum = optimizedTimes.stream().mapToLong(Long::longValue).sum();
         long optimizedAvgNs = optimizedSum / optimizedTimes.size();
+
+        // Validate: if all times are 0, the kernel failed to execute
+        boolean allZero = optimizedTimes.stream().allMatch(t -> t == 0);
+        if (allZero || optimizedAvgNs == 0) {
+            System.err.println("[MCP] ERROR: Optimized kernel failed to execute (0ms timing)");
+            lastValidationError = "Kernel execution failed (0ms timing)";
+            return Double.MAX_VALUE;
+        }
+
+        // Validate output correctness against stored original outputs
+        List<Object> outputs = tornadoExecutor.getOutputs();
+        ValidationResult validation = validateOutputs(outputs);
+        if (!validation.passed()) {
+            System.err.printf("[MCP] ✗ Validation %s%n", validation);
+            lastValidationError = validation.message();
+            return Double.MAX_VALUE;
+        } else {
+            System.out.printf("[MCP] ✓ Validation %s%n", validation);
+            lastValidationError = null;
+        }
+
         return optimizedAvgNs / 1_000_000.0;
     }
 
