@@ -1396,10 +1396,20 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         // 'size' is ambiguous — it means matrix dimension for 2D matrix kernels
         // (input is NxN so matrixDim = sqrt(inputArraySize)), but total length for
         // 1D kernels like reduction (input is a flat N-element array).
-        // Disambiguate by checking whether the input array is a perfect square:
-        //   - Perfect square → 2D matrix kernel → use matrixDim
-        //   - Not a perfect square → 1D kernel → use inputArraySize
+        // TornadoVM's reduce_seq<k> kernels hardcode the partial-sum count in the
+        // kernel itself (e.g. `setp.lt.s32 ..., 16385`) and also append it to the
+        // entry-point name (`..._floatarray_16385`). That value is independent of
+        // whether the input length happens to be a perfect square, so check the
+        // kernel source first before falling back to the matrix/1D heuristic.
         if (name.equals("size")) {
+            if (originalKernelSource != null) {
+                Integer hardcoded = extractHardcodedLoopBound(originalKernelSource);
+                if (hardcoded != null) {
+                    System.out.printf("[MCP] resolveScalarParameter: 'size' -> %d (hardcoded in original kernel)%n",
+                            hardcoded);
+                    return hardcoded;
+                }
+            }
             boolean isPerfectSquare = (matrixDim * matrixDim == inputArraySize);
             int resolved = isPerfectSquare ? matrixDim : inputArraySize;
             System.out.printf("[MCP] resolveScalarParameter: 'size' -> %d (%s, inputArraySize=%d, matrixDim=%d)%n",
@@ -1424,6 +1434,36 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
 
         // Final fallback
         return paramIndex < globalSizes.length ? globalSizes[paramIndex] : globalSizes[0];
+    }
+
+    /**
+     * Extract the numeric bound TornadoVM hardcodes into reduction / fixed-size
+     * kernels. Matches:
+     *   - PTX: `setp.lt.s32  %pred, %idx, <N>;`
+     *   - OpenCL: `i < N` / `< N)` in a for-loop header
+     *   - Entry-point suffix: `..._floatarray_<N>` / `..._intarray_<N>`
+     * Returns the largest plausible bound found, or null if none matches.
+     */
+    private static Integer extractHardcodedLoopBound(String kernelSource) {
+        int best = -1;
+        Pattern[] patterns = new Pattern[] {
+            Pattern.compile("setp\\.lt\\.s32\\s+\\S+\\s*,\\s*\\S+\\s*,\\s*(\\d+)"),
+            Pattern.compile("setp\\.lt\\.u32\\s+\\S+\\s*,\\s*\\S+\\s*,\\s*(\\d+)"),
+            Pattern.compile("for\\s*\\([^;]*;[^;]*<\\s*(\\d+)\\s*;"),
+            Pattern.compile("(?:floatarray|intarray|doublearray)_(\\d+)\\s*\\(")
+        };
+        for (Pattern p : patterns) {
+            Matcher m = p.matcher(kernelSource);
+            while (m.find()) {
+                try {
+                    int v = Integer.parseInt(m.group(1));
+                    if (v > 1 && v > best) {
+                        best = v;
+                    }
+                } catch (NumberFormatException ignored) { }
+            }
+        }
+        return best > 0 ? best : null;
     }
 
     /**
