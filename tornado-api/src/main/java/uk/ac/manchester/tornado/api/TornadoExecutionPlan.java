@@ -685,7 +685,22 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         // would free device memory for the shared input/output objects, which
         // breaks the original execution plan that shares these objects.
         List<Long> benchTimes = new ArrayList<>();
+        // Pick the device whose backend matches mcpBackend (default: tornadoExecutor's
+        // device 0). The original task's device is always OpenCL on a multi-backend
+        // install because OpenCL is driver index 0; without this lookup, PTX-targeted
+        // optimisation requests get compiled by the OpenCL JIT and fail with
+        // `clBuildProgram -> -11` ("expected identifier or '('") on the PTX header.
         TornadoDevice device = tornadoExecutor.getDevice(0);
+        if (mcpBackend.equalsIgnoreCase("ptx")) {
+            var rt = TornadoRuntimeProvider.getTornadoRuntime();
+            for (int b = 0; b < rt.getNumBackends(); b++) {
+                if (rt.getBackendType(b) == TornadoVMBackendType.PTX) {
+                    device = rt.getBackend(b).getDevice(0);
+                    System.out.printf("[MCP] Routing prebuilt task to PTX backend (driver=%d)%n", b);
+                    break;
+                }
+            }
+        }
 
         TornadoExecutionPlan benchPlan = new TornadoExecutionPlan(snapshot);
         benchPlan.withDevice(device).withGridScheduler(gridScheduler);
