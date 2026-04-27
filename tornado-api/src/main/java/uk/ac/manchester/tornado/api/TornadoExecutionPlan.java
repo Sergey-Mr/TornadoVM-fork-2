@@ -533,11 +533,31 @@ public sealed class TornadoExecutionPlan implements AutoCloseable permits Execut
         }
         int totalKernelParams = countParameters(kernelSig);
 
-        // Determine number of TornadoVM internal params based on backend:
-        // OpenCL: 4 internal params (kernel_context, constant_region, local_region, atomics)
-        // PTX:    1 internal param  (kernel_context only)
+        // Determine number of TornadoVM internal params by scanning the signature.
+        // Internal params have reserved names: _kernel_context, _constant_region,
+        // _local_region, _atomics. They always come first. Some PTX kernels emit
+        // only _kernel_context; others (including LLM-generated optimised kernels)
+        // emit all four to match the OpenCL ABI. Detecting by name handles both.
         String mcpBackend = System.getProperty("tornado.mcp.backend", "opencl");
-        int internalParams = mcpBackend.equalsIgnoreCase("ptx") ? 1 : 4;
+        int internalParams = 0;
+        {
+            String[] sigParamsForCount = kernelSig.split(",");
+            for (String p : sigParamsForCount) {
+                String trimmed = p.trim();
+                if (trimmed.contains("_kernel_context")
+                        || trimmed.contains("_constant_region")
+                        || trimmed.contains("_local_region")
+                        || trimmed.contains("_atomics")) {
+                    internalParams++;
+                } else {
+                    break; // internals are contiguous and come first
+                }
+            }
+            if (internalParams == 0) {
+                // Fallback to old behaviour if signature has no recognisable internals.
+                internalParams = mcpBackend.equalsIgnoreCase("ptx") ? 1 : 4;
+            }
+        }
         int userParams = totalKernelParams - internalParams;
 
         int dataParams = inputs.size() + outputs.size();
