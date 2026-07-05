@@ -9,35 +9,36 @@ import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
+import uk.ac.manchester.tornado.api.TornadoExecutionResult;
+import uk.ac.manchester.tornado.api.TornadoProfilerResult;
+import uk.ac.manchester.tornado.api.TornadoRuntime;
 import uk.ac.manchester.tornado.api.WorkerGrid2D;
 import uk.ac.manchester.tornado.api.common.Access;
 import uk.ac.manchester.tornado.api.common.TornadoDevice;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
-import uk.ac.manchester.tornado.api.exceptions.TornadoExecutionPlanException;
-import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
-import uk.ac.manchester.tornado.api.runtime.TornadoRuntimeProvider;
-import uk.ac.manchester.tornado.api.TornadoExecutionResult;
-import uk.ac.manchester.tornado.api.TornadoProfilerResult;
 import uk.ac.manchester.tornado.api.enums.ProfilerMode;
+import uk.ac.manchester.tornado.api.enums.TornadoVMBackendType;
+import uk.ac.manchester.tornado.api.exceptions.TornadoExecutionPlanException;
+import uk.ac.manchester.tornado.api.runtime.TornadoRuntimeProvider;
+import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 
 /**
- * Single-kernel benchmark for Matrix Multiplication 1D.
- * Measures ONLY kernel execution time - run once per kernel for fair comparison.
+ * Single-kernel benchmark for Matrix Multiplication 1D on the METAL backend.
+ * Measures ONLY kernel execution time - run once per kernel in a fresh JVM for
+ * a fair comparison, following the same methodology as the OpenCL/PTX variants.
  *
- * Usage: java ... MatrixMultiplication1DSingleKernelBenchmark <kernel.cl> [size]
+ * Usage: java ... MatrixMultiplication1DMetalSingleKernelBenchmark <kernel.metal> [size] [local] [--entry=NAME]
  *
- * Default size: 1024x1024
+ * The entry point defaults to the fully-qualified name TornadoVM emits for the
+ * Metal backend; override with --entry= if your kernel uses a different name.
  */
-public class MatrixMultiplication1DSingleKernelBenchmark {
+public class MatrixMultiplication1DMetalSingleKernelBenchmark {
 
     private static final int DEFAULT_SIZE = 1024;
-    // Apple M4 supports max 32 threads per work-group
-    // Use 4x8 = 32 for tiled kernel, or 4x4 = 16 for WPT kernel
-    private static final int LOCAL_WORK_SIZE_X = 4;  // Columns
-    private static final int LOCAL_WORK_SIZE_Y = 8;  // Rows (4x8 = 32 threads)
+    private static final int DEFAULT_LOCAL = 16; // Metal supports up to 1024 threads/threadgroup
     private static final int WARM_UP_ITERATIONS = 50;
     private static final int BENCHMARK_ITERATIONS = 100;
-    private static final String ENTRY_POINT = "matrixMultiplication";
+    private static final String DEFAULT_ENTRY = "uk_ac_manchester_tornado_examples_compute_MatrixMultiplication1D_matrixMultiplication";
     private static final Random RANDOM = new Random(42);
 
     private static void fillRandomData(FloatArray array, float min, float max) {
@@ -47,22 +48,41 @@ public class MatrixMultiplication1DSingleKernelBenchmark {
         }
     }
 
+    private static TornadoDevice getMetalDevice() {
+        TornadoRuntime runtime = TornadoRuntimeProvider.getTornadoRuntime();
+        for (int i = 0; i < runtime.getNumBackends(); i++) {
+            if (runtime.getBackendType(i) == TornadoVMBackendType.METAL) {
+                return runtime.getBackend(i).getDevice(0);
+            }
+        }
+        throw new RuntimeException("No Metal backend available. Rebuild TornadoVM with --backend metal.");
+    }
+
     public static void main(String[] args) throws TornadoExecutionPlanException {
         if (args.length < 1) {
-            System.out.println("Usage: MatrixMultiplication1DSingleKernelBenchmark <kernel.cl> [size]");
+            System.out.println("Usage: MatrixMultiplication1DMetalSingleKernelBenchmark <kernel.metal> [size] [local] [--entry=NAME]");
             System.exit(1);
         }
 
-        String kernelPath = args[0];
-        int size = (args.length >= 2) ? Integer.parseInt(args[1]) : DEFAULT_SIZE;
-        // Optional local work size to match a kernel's reqd_work_group_size
-        // Usage: <kernel> <size> [localX] [localY]   (localY defaults to localX)
-        int localX = (args.length >= 3) ? Integer.parseInt(args[2]) : LOCAL_WORK_SIZE_X;
-        int localY = (args.length >= 4) ? Integer.parseInt(args[3]) : (args.length >= 3 ? localX : LOCAL_WORK_SIZE_Y);
+        String entryPoint = DEFAULT_ENTRY;
+        java.util.List<String> pos = new java.util.ArrayList<>();
+        for (String a : args) {
+            if (a.startsWith("--entry=")) {
+                entryPoint = a.substring(8);
+            } else {
+                pos.add(a);
+            }
+        }
+
+        String kernelPath = pos.get(0);
+        int size = (pos.size() >= 2) ? Integer.parseInt(pos.get(1)) : DEFAULT_SIZE;
+        int local = (pos.size() >= 3) ? Integer.parseInt(pos.get(2)) : DEFAULT_LOCAL;
 
         System.out.println("Kernel: " + kernelPath);
+        System.out.println("Backend: Metal");
         System.out.println("Matrix size: " + size + "x" + size);
-        System.out.println("Local work size: " + localX + "x" + localY);
+        System.out.println("Local work size: " + local + "x" + local);
+        System.out.println("Entry point: " + entryPoint);
         System.out.println("Warmup iterations: " + WARM_UP_ITERATIONS);
         System.out.println("Benchmark iterations: " + BENCHMARK_ITERATIONS);
 
@@ -70,14 +90,12 @@ public class MatrixMultiplication1DSingleKernelBenchmark {
         FloatArray matrixB = new FloatArray(size * size);
         FloatArray matrixC = new FloatArray(size * size);
 
-        TornadoDevice device = TornadoRuntimeProvider.getTornadoRuntime().getDefaultDevice();
+        TornadoDevice device = getMetalDevice();
         System.out.println("Device: " + device);
 
         fillRandomData(matrixA, -1.0f, 1.0f);
         fillRandomData(matrixB, -1.0f, 1.0f);
 
-        // Set up kernel parameters
-        // Kernel signature: matrixMultiplication(A, B, C, size)
         AccessorParameters accessors = new AccessorParameters(4);
         accessors.set(0, matrixA, Access.READ_ONLY);
         accessors.set(1, matrixB, Access.READ_ONLY);
@@ -86,15 +104,13 @@ public class MatrixMultiplication1DSingleKernelBenchmark {
 
         TaskGraph graph = new TaskGraph("s0")
                 .transferToDevice(DataTransferMode.FIRST_EXECUTION, matrixA, matrixB)
-                .prebuiltTask("t0", ENTRY_POINT, kernelPath, accessors)
+                .prebuiltTask("t0", entryPoint, kernelPath, accessors)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, matrixC);
 
         ImmutableTaskGraph snapshot = graph.snapshot();
 
-        // 2D grid: one thread per output element
-        // Apple M4 max work-group size is 32, so use 4x8 = 32
         WorkerGrid2D worker = new WorkerGrid2D(size, size);
-        worker.setLocalWork(localX, localY, 1);
+        worker.setLocalWork(local, local, 1);
         GridScheduler scheduler = new GridScheduler("s0.t0", worker);
 
         ArrayList<Long> kernelTimes = new ArrayList<>();
@@ -102,28 +118,22 @@ public class MatrixMultiplication1DSingleKernelBenchmark {
         try (TornadoExecutionPlan plan = new TornadoExecutionPlan(snapshot)) {
             plan.withDevice(device).withGridScheduler(scheduler);
 
-            // Warmup (includes compilation)
             System.out.println("Warming up...");
             for (int i = 0; i < WARM_UP_ITERATIONS; i++) {
                 plan.execute();
             }
 
-            // Measure kernel time only
             System.out.println("Measuring kernel time...");
             for (int i = 0; i < BENCHMARK_ITERATIONS; i++) {
                 TornadoExecutionResult result = plan
                         .withProfiler(ProfilerMode.SILENT)
                         .execute();
-
                 TornadoProfilerResult profilerResult = result.getProfilerResult();
-                long kernelTime = profilerResult.getDeviceKernelTime();
-                kernelTimes.add(kernelTime);
+                kernelTimes.add(profilerResult.getDeviceKernelTime());
             }
         }
 
         LongSummaryStatistics stats = kernelTimes.stream().mapToLong(Long::longValue).summaryStatistics();
-
-        // FLOPS for matrix multiplication: 2 * N^3 (N^3 multiplications + N^3 additions)
         long totalFlops = 2L * size * size * size;
         double gflops = (totalFlops * 1e-9) / (stats.getAverage() * 1e-9);
 
