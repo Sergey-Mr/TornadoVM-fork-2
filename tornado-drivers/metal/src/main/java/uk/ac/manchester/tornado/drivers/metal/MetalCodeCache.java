@@ -362,4 +362,71 @@ public class MetalCodeCache {
     public MetalInstalledCode getInstalledCode(String id, String entryPoint) {
         return cache.get(id + "-" + entryPoint);
     }
+
+    /**
+     * Get the kernel source code for a cached kernel.
+     * Used for MCP kernel comparison - to extract the generated MSL kernel
+     * after first execution.
+     *
+     * @param id Task graph ID
+     * @param entryPoint Kernel entry point name
+     * @return The Metal Shading Language source as a string, or null if not found
+     */
+    public String getKernelSource(String id, String entryPoint) {
+        // Try exact match first
+        MetalInstalledCode installedCode = cache.get(id + "-" + entryPoint);
+        if (installedCode != null) {
+            return installedCode.getGeneratedSourceCode();
+        }
+
+        // Try prefix matching - the cache key format may be a mangled name like
+        // s0_t0_matrixmultiplication_arrays_... while we are given id="s0.t0"
+        // and entryPoint="matrixMultiplication".
+        String normalizedId = id.replace(".", "_");
+        String normalizedEntry = entryPoint.toLowerCase();
+        String prefix = normalizedId + "_" + normalizedEntry;
+
+        for (String key : cache.keySet()) {
+            if (key.startsWith(prefix)) {
+                return cache.get(key).getGeneratedSourceCode();
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Invalidate a cached kernel to force recompilation.
+     * Used for MCP kernel comparison - to replace the kernel with an optimised version.
+     *
+     * @param id Task graph ID
+     * @param entryPoint Kernel entry point name
+     */
+    public void invalidateKernel(String id, String entryPoint) {
+        String key = id + "-" + entryPoint;
+        MetalInstalledCode installedCode = cache.get(key);
+        if (installedCode != null) {
+            installedCode.invalidate();
+            cache.remove(key);
+        }
+    }
+
+    /**
+     * Replace a cached kernel with new source code.
+     * Used for MCP kernel comparison - run the optimised kernel under the same conditions.
+     *
+     * @param meta Task metadata
+     * @param id Task graph ID
+     * @param entryPoint Kernel entry point name
+     * @param newSource New Metal Shading Language source code
+     * @return The new installed code, or null if installation failed
+     */
+    public MetalInstalledCode replaceKernelSource(TaskDataContext meta, String id, String entryPoint, String newSource) {
+        // First invalidate the existing kernel
+        invalidateKernel(id, entryPoint);
+
+        // Install the new source
+        byte[] sourceBytes = newSource.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        return installSource(meta, id, entryPoint, sourceBytes);
+    }
 }

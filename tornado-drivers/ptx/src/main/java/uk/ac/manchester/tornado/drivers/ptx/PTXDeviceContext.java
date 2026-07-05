@@ -48,6 +48,7 @@ import uk.ac.manchester.tornado.api.types.HalfFloat;
 import uk.ac.manchester.tornado.drivers.common.TornadoBufferProvider;
 import uk.ac.manchester.tornado.drivers.common.power.PowerMetric;
 import uk.ac.manchester.tornado.drivers.ptx.graal.PTXCodeUtil;
+import uk.ac.manchester.tornado.drivers.ptx.graal.PTXInstalledCode;
 import uk.ac.manchester.tornado.drivers.ptx.graal.compiler.PTXCompilationResult;
 import uk.ac.manchester.tornado.drivers.ptx.mm.PTXKernelStackFrame;
 import uk.ac.manchester.tornado.drivers.ptx.mm.PTXMemoryManager;
@@ -643,5 +644,23 @@ public class PTXDeviceContext implements TornadoDeviceContext {
 
     public void destroyExecutionGraph(long executionGraphHandle) {
         PTXStream.destroyGraph(executionGraphHandle);
+    }
+
+    // =========================================================================
+    // MCP Kernel Comparison Support
+    // =========================================================================
+
+    @Override
+    public String getKernelSource(long executionPlanId, String taskId, String entryPoint) {
+        PTXCodeCache ptxCodeCache = getPTXCodeCache(executionPlanId);
+        // PTX uses taskId as the cache key
+        return ptxCodeCache.getKernelSource(taskId);
+    }
+
+    @Override
+    public boolean replaceKernelSource(long executionPlanId, String taskId, String entryPoint, String newKernelSource, Object meta) {
+        PTXCodeCache ptxCodeCache = getPTXCodeCache(executionPlanId);
+        PTXInstalledCode installedCode = ptxCodeCache.replaceKernelSource(taskId, entryPoint, newKernelSource, false);
+        return installedCode != null;
     }
 }

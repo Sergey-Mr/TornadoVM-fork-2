@@ -206,9 +206,13 @@ public class PTXTornadoDevice implements TornadoXPUDevice {
     private TornadoInstalledCode compilePreBuiltTask(long executionPlanId, SchedulableTask task) {
         final PTXDeviceContext deviceContext = getDeviceContext();
         final PrebuiltTask executable = (PrebuiltTask) task;
-        String functionName = PTXCodeUtil.buildKernelName(executable.getEntryPoint(), executable);
-        if (deviceContext.isCached(executionPlanId, executable.getEntryPoint(), executable)) {
-            return deviceContext.getInstalledCode(executionPlanId, functionName);
+        // For prebuiltTask, use the entry point name directly as the function name.
+        // Do NOT mangle it with buildKernelName — the PTX file contains the function
+        // with the entry point name as-is (e.g., "matrixVectorGeneric" or the full
+        // TornadoVM mangled name). cuModuleGetFunction must match exactly.
+        String entryPoint = executable.getEntryPoint();
+        if (deviceContext.isCached(executionPlanId, entryPoint, executable)) {
+            return deviceContext.getInstalledCode(executionPlanId, entryPoint);
         }
 
         final Path path = Paths.get(executable.getFilename());
@@ -217,7 +221,9 @@ public class PTXTornadoDevice implements TornadoXPUDevice {
         try {
             byte[] source = Files.readAllBytes(path);
             source = PTXCodeUtil.getCodeWithAttachedPTXHeader(source, getBackend());
-            return deviceContext.installCode(taskMeta, executionPlanId, functionName, source, executable.getEntryPoint(), task.meta().isPrintKernelEnabled());
+            // For prebuiltTask: use entryPoint as both cache key and function name
+            // so cuModuleGetFunction finds the actual function name in the PTX.
+            return deviceContext.installCode(taskMeta, executionPlanId, entryPoint, source, entryPoint, task.meta().isPrintKernelEnabled());
         } catch (IOException e) {
             e.printStackTrace();
         }

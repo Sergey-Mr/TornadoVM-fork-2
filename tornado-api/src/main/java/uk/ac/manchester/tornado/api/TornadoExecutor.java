@@ -218,6 +218,12 @@ class TornadoExecutor {
         return outputs;
     }
 
+    List<Object> getInputs() {
+        List<Object> inputs = new ArrayList<>();
+        immutableTaskGraphList.forEach(immutableTaskGraph -> inputs.addAll(immutableTaskGraph.getInputs()));
+        return inputs;
+    }
+
     void withoutThreadInfo() {
         immutableTaskGraphList.forEach(ImmutableTaskGraph::withoutThreadInfo);
     }
@@ -371,5 +377,59 @@ class TornadoExecutor {
 
     public void withWarmUpIterations(int iterations, ExecutorFrame executorFrame) {
         IntStream.range(0, iterations).forEach(iteration -> runForWarmUp(executorFrame));
+    }
+
+    // =========================================================================
+    // MCP Kernel Comparison Support
+    // =========================================================================
+
+    /**
+     * Get the generated kernel source code for a specific task.
+     */
+    String getGeneratedKernelSource(int taskGraphIndex, String taskId, long executionPlanId) {
+        if (taskGraphIndex >= immutableTaskGraphList.size()) {
+            throw new TornadoRuntimeException("TaskGraph index #" + taskGraphIndex + " does not exist");
+        }
+        ImmutableTaskGraph itg = immutableTaskGraphList.get(taskGraphIndex);
+        return itg.getGeneratedKernelSource(taskId, executionPlanId);
+    }
+
+    /**
+     * Replace the kernel source for a specific task.
+     */
+    boolean replaceKernelSource(int taskGraphIndex, String taskId, String newKernelSource, long executionPlanId) {
+        if (taskGraphIndex >= immutableTaskGraphList.size()) {
+            throw new TornadoRuntimeException("TaskGraph index #" + taskGraphIndex + " does not exist");
+        }
+        ImmutableTaskGraph itg = immutableTaskGraphList.get(taskGraphIndex);
+        return itg.replaceKernelSource(taskId, newKernelSource, executionPlanId);
+    }
+
+    /**
+     * Get the name of the first task graph.
+     * Used by MCP to configure grid scheduler.
+     */
+    String getTaskGraphName() {
+        if (immutableTaskGraphList.isEmpty()) {
+            return "s0";  // Default name
+        }
+        return immutableTaskGraphList.get(0).getTaskGraph().getTaskGraphName();
+    }
+
+    /**
+     * Get the first task ID from the first task graph.
+     * Used by MCP to extract and optimize kernel source.
+     */
+    String getFirstTaskId() {
+        if (immutableTaskGraphList.isEmpty()) {
+            return "t0";  // Default
+        }
+        TaskGraph taskGraph = immutableTaskGraphList.get(0).getTaskGraph();
+        java.util.Set<String> taskNames = taskGraph.getTaskNames();
+        if (taskNames == null || taskNames.isEmpty()) {
+            return "t0";  // Default
+        }
+        // Return the first task name
+        return taskNames.iterator().next();
     }
 }

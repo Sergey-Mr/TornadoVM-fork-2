@@ -31,3 +31,9 @@ tornado.iml
 tornado_unittests.log
 OpenCL-Headers/
 tornado-assembly/src/etc/tornado.backend
+
+# MCP experiment output dumps
+*_output.txt
+# benchmark stats dumps
+stats-*.txt
+null/

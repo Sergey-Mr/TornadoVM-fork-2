@@ -243,4 +243,20 @@ public class VirtualOCLDeviceContext implements OCLDeviceContextInterface {
         return false;
     }
 
+    // =========================================================================
+    // MCP Kernel Comparison Support (stub implementation for Virtual device)
+    // =========================================================================
+
+    @Override
+    public String getKernelSource(long executionPlanId, String taskId, String entryPoint) {
+        // Virtual device - kernel source retrieval not supported
+        return null;
+    }
+
+    @Override
+    public boolean replaceKernelSource(long executionPlanId, String taskId, String entryPoint, String newKernelSource, Object meta) {
+        // Virtual device - kernel replacement not supported
+        return false;
+    }
+
 }

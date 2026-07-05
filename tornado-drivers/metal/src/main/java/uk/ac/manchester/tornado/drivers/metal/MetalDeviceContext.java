@@ -664,4 +664,28 @@ public class MetalDeviceContext implements MetalDeviceContextInterface {
         MetalCommandQueue commandQueue = getCommandQueue(executionPlanId);
         return commandQueue.mapOnDeviceMemoryRegion(commandQueue.getCommandQueuePtr(), destDevicePtr, srcDevicePtr, offset, sizeOfType, sizeSource, sizeDest);
     }
+
+    // =========================================================================
+    // MCP Kernel Comparison Support
+    // =========================================================================
+
+    @Override
+    public String getKernelSource(long executionPlanId, String taskId, String entryPoint) {
+        MetalCodeCache metalCodeCache = getMetalCodeCache(executionPlanId);
+        return metalCodeCache.getKernelSource(taskId, entryPoint);
+    }
+
+    @Override
+    public boolean replaceKernelSource(long executionPlanId, String taskId, String entryPoint, String newKernelSource, Object meta) {
+        MetalCodeCache metalCodeCache = getMetalCodeCache(executionPlanId);
+
+        // Cast meta to TaskDataContext (can be null)
+        TaskDataContext taskMeta = null;
+        if (meta instanceof TaskDataContext) {
+            taskMeta = (TaskDataContext) meta;
+        }
+
+        MetalInstalledCode installedCode = metalCodeCache.replaceKernelSource(taskMeta, taskId, entryPoint, newKernelSource);
+        return installedCode != null;
+    }
 }

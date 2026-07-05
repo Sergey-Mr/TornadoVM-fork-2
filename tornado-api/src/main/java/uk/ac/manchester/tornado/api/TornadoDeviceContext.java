@@ -51,4 +51,30 @@ public interface TornadoDeviceContext {
     int getDriverIndex();
 
     Set<Long> getRegisteredPlanIds();
+
+    // =========================================================================
+    // MCP Kernel Comparison Support
+    // =========================================================================
+
+    /**
+     * Get the kernel source code for a cached kernel.
+     *
+     * @param executionPlanId The execution plan ID
+     * @param taskId The task ID
+     * @param entryPoint The kernel entry point name
+     * @return The kernel source code, or null if not found
+     */
+    String getKernelSource(long executionPlanId, String taskId, String entryPoint);
+
+    /**
+     * Replace a cached kernel with new source code.
+     *
+     * @param executionPlanId The execution plan ID
+     * @param taskId The task ID
+     * @param entryPoint The kernel entry point name
+     * @param newKernelSource The new kernel source code
+     * @param meta Task metadata (can be null)
+     * @return true if replacement was successful
+     */
+    boolean replaceKernelSource(long executionPlanId, String taskId, String entryPoint, String newKernelSource, Object meta);
 }

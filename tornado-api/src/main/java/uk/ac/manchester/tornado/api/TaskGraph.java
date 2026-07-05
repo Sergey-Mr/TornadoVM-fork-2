@@ -658,6 +658,15 @@ public class TaskGraph implements TaskGraphInterface {
     }
 
     /**
+     * Get all task names in this task graph.
+     *
+     * @return Set of task names
+     */
+    public Set<String> getTaskNames() {
+        return taskNames;
+    }
+
+    /**
      * Tag a set of objects (Java objects) to be transferred to the device. There
      * are three modes:
      *
@@ -963,12 +972,34 @@ public class TaskGraph implements TaskGraphInterface {
         return taskGraphImpl.getOutputs();
     }
 
+    public Collection<?> getInputs() {
+        return taskGraphImpl.getInputs();
+    }
+
     TornadoTaskGraphInterface getTaskGraphImpl() {
         return taskGraphImpl;
     }
 
     public boolean isGridRegistered() {
         return taskGraphImpl.isGridRegistered();
+    }
+
+    // =========================================================================
+    // MCP Kernel Comparison Support
+    // =========================================================================
+
+    /**
+     * Get the generated kernel source code for a specific task.
+     */
+    String getGeneratedKernelSource(String taskId, long executionPlanId) {
+        return taskGraphImpl.getGeneratedKernelSource(taskId, executionPlanId);
+    }
+
+    /**
+     * Replace the kernel source for a specific task.
+     */
+    boolean replaceKernelSource(String taskId, String newKernelSource, long executionPlanId) {
+        return taskGraphImpl.replaceKernelSource(taskId, newKernelSource, executionPlanId);
     }
 
 }

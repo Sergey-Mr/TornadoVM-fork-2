@@ -58,6 +58,7 @@ import uk.ac.manchester.tornado.api.KernelContext;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.TornadoBackend;
 import uk.ac.manchester.tornado.api.TornadoRuntime;
+import uk.ac.manchester.tornado.api.TornadoDeviceContext;
 import uk.ac.manchester.tornado.api.TornadoTaskGraphInterface;
 import uk.ac.manchester.tornado.api.common.Access;
 import uk.ac.manchester.tornado.api.common.Event;
@@ -343,7 +344,24 @@ public class TornadoTaskGraph implements TornadoTaskGraphInterface {
 
     @Override
     public Collection<?> getOutputs() {
-        return streamOutObjects;
+        // Return objects from outputModeObjects (which includes all transfer modes)
+        // not just streamOutObjects (which only includes EVERY_EXECUTION mode)
+        List<Object> outputs = new ArrayList<>();
+        for (StreamingObject outputObject : outputModeObjects) {
+            outputs.add(outputObject.getObject());
+        }
+        return outputs;
+    }
+
+    @Override
+    public Collection<?> getInputs() {
+        // Return objects from inputModesObjects (which includes all transfer modes)
+        // not just streamInObjects (which only includes EVERY_EXECUTION mode)
+        List<Object> inputs = new ArrayList<>();
+        for (StreamingObject inputObject : inputModesObjects) {
+            inputs.add(inputObject.getObject());
+        }
+        return inputs;
     }
 
     @Override
@@ -1931,6 +1949,100 @@ public class TornadoTaskGraph implements TornadoTaskGraphInterface {
     }
 
     private record CompileInfo(boolean compile, boolean updateDevice) {
+    }
+
+    // =========================================================================
+    // MCP Kernel Comparison Support
+    // =========================================================================
+
+    /**
+     * Get the generated kernel source code for a specific task.
+     * This method is used for MCP kernel comparison - to extract the kernel
+     * that TornadoVM generated so it can be sent to the MCP server for optimization.
+     *
+     * @param taskId The task ID (e.g., "t0")
+     * @param executionPlanId The execution plan ID
+     * @return The kernel source code, or null if not found
+     */
+    @Override
+    public String getGeneratedKernelSource(String taskId, long executionPlanId) {
+        // Find the task by ID
+        SchedulableTask task = null;
+        String entryPoint = null;
+
+        for (int i = 0; i < executionContext.getTaskCount(); i++) {
+            SchedulableTask t = executionContext.getTask(i);
+            if (t.getId().endsWith("." + taskId) || t.getId().equals(taskId)) {
+                task = t;
+                break;
+            }
+        }
+
+        if (task == null) {
+            return null;
+        }
+
+        // Get the entry point name
+        if (task instanceof CompilableTask compilableTask) {
+            entryPoint = TornadoCoreRuntime.getTornadoRuntime()
+                    .resolveMethod(compilableTask.getMethod()).getName();
+        } else if (task instanceof PrebuiltTask prebuiltTask) {
+            entryPoint = prebuiltTask.getEntryPoint();
+        }
+
+        if (entryPoint == null) {
+            return null;
+        }
+
+        // Get the kernel source from the code cache
+        TornadoDeviceContext deviceContext = task.getDevice().getDeviceContext();
+        System.out.println("[MCP DEBUG] Requesting kernel for taskId: " + task.getId() + ", entryPoint: " + entryPoint);
+        return deviceContext.getKernelSource(executionPlanId, task.getId(), entryPoint);
+    }
+
+    /**
+     * Replace the kernel source for a specific task.
+     * This method is used for MCP kernel comparison - to run an optimized kernel
+     * under the exact same conditions as the original.
+     *
+     * @param taskId The task ID (e.g., "t0")
+     * @param newKernelSource The new kernel source code
+     * @param executionPlanId The execution plan ID
+     * @return true if replacement was successful
+     */
+    @Override
+    public boolean replaceKernelSource(String taskId, String newKernelSource, long executionPlanId) {
+        // Find the task by ID
+        SchedulableTask task = null;
+        String entryPoint = null;
+
+        for (int i = 0; i < executionContext.getTaskCount(); i++) {
+            SchedulableTask t = executionContext.getTask(i);
+            if (t.getId().endsWith("." + taskId) || t.getId().equals(taskId)) {
+                task = t;
+                break;
+            }
+        }
+
+        if (task == null) {
+            return false;
+        }
+
+        // Get the entry point name
+        if (task instanceof CompilableTask compilableTask) {
+            entryPoint = TornadoCoreRuntime.getTornadoRuntime()
+                    .resolveMethod(compilableTask.getMethod()).getName();
+        } else if (task instanceof PrebuiltTask prebuiltTask) {
+            entryPoint = prebuiltTask.getEntryPoint();
+        }
+
+        if (entryPoint == null) {
+            return false;
+        }
+
+        // Replace the kernel in the code cache
+        TornadoDeviceContext deviceContext = task.getDevice().getDeviceContext();
+        return deviceContext.replaceKernelSource(executionPlanId, task.getId(), entryPoint, newKernelSource, task.meta());
     }
 
 }

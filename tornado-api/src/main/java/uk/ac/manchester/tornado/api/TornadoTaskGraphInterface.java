@@ -112,6 +112,8 @@ public interface TornadoTaskGraphInterface extends ProfilerInterface {
 
     Collection<?> getOutputs();
 
+    Collection<?> getInputs();
+
     TornadoTaskGraphInterface createImmutableTaskGraph();
 
     void enableProfiler(ProfilerMode profilerMode);
@@ -145,4 +147,29 @@ public interface TornadoTaskGraphInterface extends ProfilerInterface {
     void setLastExecutedTaskGraph(TornadoTaskGraphInterface lastExecutedTaskGraph);
 
     boolean isGridRegistered();
+
+    // =========================================================================
+    // MCP Kernel Comparison Support
+    // =========================================================================
+
+    /**
+     * Get the generated kernel source code for a specific task.
+     * This method is used for MCP kernel comparison.
+     *
+     * @param taskId The task ID (e.g., "t0")
+     * @param executionPlanId The execution plan ID
+     * @return The kernel source code, or null if not found
+     */
+    String getGeneratedKernelSource(String taskId, long executionPlanId);
+
+    /**
+     * Replace the kernel source for a specific task.
+     * This method is used for MCP kernel comparison.
+     *
+     * @param taskId The task ID (e.g., "t0")
+     * @param newKernelSource The new kernel source code
+     * @param executionPlanId The execution plan ID
+     * @return true if replacement was successful
+     */
+    boolean replaceKernelSource(String taskId, String newKernelSource, long executionPlanId);
 }
